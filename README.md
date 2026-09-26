@@ -29,16 +29,21 @@ An LLM judge then adds a second opinion per call, either "matches", "does not ma
 ## How it works
 
 ```
-Your Mac or Linux machine                  Disposable Linux container (no network)
--------------------------                  ---------------------------------------
+Your Mac or Linux machine                  Disposable Linux container (internal network only)
+-------------------------                  --------------------------------------------------
 mcpdet detonate target.toml
   1. build image, install server  ------>
   2. plant decoy credentials      ------>  driver (acts as the MCP client)
-  3. start container, wait                   |
+  3. start proxy and container               |
                                              +-- strace (traces the server and every child)
                                                    |
                                                    +-- MCP server (unprivileged user)
-  4. copy results out            <------   syscall trace + message transcript
+                                                          |
+                                                          | HTTP and HTTPS only
+                                                          v
+                                           mitmproxy container ------> internet
+                                           (logs every request and response)
+  4. copy results out            <------   syscall trace, message transcript, proxy log
   5. parse, attribute, apply rules
   6. write report.md
 ```
@@ -46,6 +51,8 @@ mcpdet detonate target.toml
 A small driver inside the container plays the role of an MCP client such as Claude Desktop. It sends `initialize`, lists the tools, and then calls them one at a time. It records the exact time of every message.
 
 At the same time, `strace` records every system call the server and its child processes make. That covers processes started, files opened or written, and network connections attempted.
+
+The server can reach the internet, but only through a `mitmproxy` container that logs every request and response in full, including HTTPS. Each logged request is joined to the process that sent it. A connection that tries to skip the proxy has no route out, and the trace still records the attempt.
 
 After the run, `mcpdet` joins the two streams on time and on the process tree. The result says which call caused which action.
 
@@ -81,8 +88,9 @@ The excerpt below is made up. It shows the shape of one tool-call section.
 > | Rule | What happened | Link | Does the tool mention it? |
 > |---|---|---|---|
 > | Credential access | Opened `~/.aws/credentials` (a planted decoy) | Weak | No |
-> | Network attempt | DNS lookup of `akia7q2k…exfil.example`, then a blocked connect to 203.0.113.7 port 443 | Weak | No |
-> | Canary exposed | The decoy AWS key appeared inside that DNS name | Weak | No |
+> | Network attempt | DNS lookup of `akia7q2k…exfil.example`, then a blocked direct connect to 203.0.113.7 port 443 | Weak | No |
+> | Network attempt | `POST https://exfil.example/collect` through the proxy, request and response logged | Weak | No |
+> | Canary exposed | The decoy AWS key appeared inside that DNS name and in the POST body | Weak | No |
 >
 > **LLM opinion, not evidence.** Does not match. The tool claims only to count words, but events e212 and e219 read a credential file and send its key out in a DNS lookup.
 
@@ -94,7 +102,7 @@ Each part of `mcpdet` has one job:
 
 | Component | Job |
 |---|---|
-| Sandbox | Builds the image, plants decoys, runs the container with no network and capped CPU, memory, and process count, and removes it after the run. |
+| Sandbox | Builds the image, plants decoys, runs the container behind a logging proxy with capped CPU, memory, and process count, and removes it after the run. |
 | Driver | Acts as the MCP client inside the container. Sends one request at a time and timestamps every message. |
 | Sensors | Trace the server and all its children with `strace`, then parse the trace into typed events. |
 | Static profile | Reads the installed package without running it. Lists dependencies, install scripts, tool descriptions, and source lines that touch files, the network, or subprocesses. Flags tool descriptions that hide characters or contain instruction-like phrases such as "do not tell the user". |
@@ -113,7 +121,7 @@ Raw artifacts (the trace and the message transcript) are the source of truth. Ev
 | Trace with `strace`, following every child process. | It traces exactly the server and its descendants, needs no kernel modules, and prints readable paths, addresses, and buffers. It also puts no code inside the server. |
 | The driver runs inside the container, next to the tracer. | Attribution joins two timelines. On a Mac, Docker runs containers in a VM with its own clock, so putting both timelines in one kernel keeps them on the same clock. |
 | Call tools one at a time, with a one-second gap between calls. | Only one request is ever in flight, so call windows never overlap. The gap catches background work before the next call starts. |
-| The network is blocked, but every attempt is recorded. | Blocking is the safe default for untrusted code. The report still shows each destination, each DNS name, and which process tried. |
+| The network is allowed by default, through a logging `mitmproxy`. Block is a per-target option. | A blocked run stops at the first connection and never shows what came back. The proxy keeps the full request and response, and the decoy-secret search covers those bodies. Block stays available for a run that must not leave the container. |
 | Plant decoy credentials with fresh random values each run. | Reading an environment variable is invisible to any tracer, but a decoy value that later shows up in a DNS name or a file proves the secret moved. |
 | Evidence is deterministic. The LLM only interprets it, as the last build step. | Sensors, attribution, and rules give the same answer every time and can be verified. The LLM adds judgment where fixed rules cannot, and it can never change the evidence. |
 | A CLI that writes a Markdown report. | It is the smallest interface that produces the report, and a Markdown file reads anywhere. |
@@ -148,7 +156,7 @@ The plan favors depth on a few servers over a broad scanner:
 Each step ends in a run that a check script verifies against expected values:
 
 1. **Prove attribution on `detfix`.** A child that outlives its call stays with that call. A delayed write lands in the unmatched bucket. No event is lost.
-2. **Add decoys and rules.** The hidden credential read, the DNS lookup, and the exposed decoy key all show up as named findings.
+2. **Add decoys, rules, and the proxy.** The hidden credential read, the DNS lookup, the proxied POST carrying the decoy key, and a real response from `example.com` all show up, joined to the right tool call. A block-mode rerun records no proxy traffic.
 3. **Add the static profile and the report.** Rebuilding the report from saved files gives byte-identical output.
 4. **Run `mcp-server-git`.** Every git tool shows its `git` child process as a strong link.
 5. **Run `server-filesystem`.** File writes appear as weak links, and a read outside the allowed folder is refused and never touches the decoy.
@@ -158,14 +166,15 @@ Each step ends in a run that a check script verifies against expected values:
 
 - A server can detect that it is being traced and behave differently. Evasion is out of scope for v1.
 - Behavior that only appears with inputs we did not try will not show up.
-- With the network blocked, anything a server would do after a successful connection stays unseen.
+- The container can contact real internet hosts. The remote host sees your network's public address and receives whatever the server sends. Inside the sandbox that is only decoy secrets and the package's own data, and the proxy log records all of it.
+- A client that ignores proxy settings behaves as if blocked, and a client that pins certificates shows only the host and a failed handshake.
+- In block mode, anything a server would do after a successful connection stays unseen.
 - A Linux run shows Linux behavior. The report flags source code that branches on the operating system.
 
 ## After v1
 
-1. A proxied network mode through `mitmproxy`, which logs full request bodies so the decoy-secret search also covers HTTP and HTTPS traffic.
-2. Tracing the package install as its own detonation.
-3. Hooks that log environment variable reads inside Python and Node servers, labeled as weaker evidence than the trace.
+1. Tracing the package install as its own detonation.
+2. Hooks that log environment variable reads inside Python and Node servers, labeled as weaker evidence than the trace.
 
 ## Planned usage
 
@@ -176,6 +185,6 @@ mcpdet detonate targets/mcp-server-git.toml
 mcpdet report runs/<run-id>
 ```
 
-A target file names the package and pinned version, or a local source folder, plus the server command and the tool calls to make. `mcpdet` installs its own copy inside the container. It never runs the copy already installed on your machine.
+A target file names the package and pinned version, or a local source folder, plus the server command and the tool calls to make. It can also set `network = "block"` for a run that must not leave the container. `mcpdet` installs its own copy inside the container. It never runs the copy already installed on your machine.
 
 Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Python 3.12. The judge also needs `OPENROUTER_API_KEY`. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
