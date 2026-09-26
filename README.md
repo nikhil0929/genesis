@@ -90,10 +90,10 @@ Each part of `mcpdet` has one job:
 
 | Component | Job |
 |---|---|
-| Sandbox | Builds the image, plants decoys, runs the container with no network, and removes it after the run. |
+| Sandbox | Builds the image, plants decoys, runs the container with no network and capped CPU, memory, and process count, and removes it after the run. |
 | Driver | Acts as the MCP client inside the container. Sends one request at a time and timestamps every message. |
 | Sensors | Trace the server and all its children with `strace`, then parse the trace into typed events. |
-| Static profile | Reads the installed package without running it. Lists dependencies, install scripts, tool descriptions, and source lines that touch files, the network, or subprocesses. |
+| Static profile | Reads the installed package without running it. Lists dependencies, install scripts, tool descriptions, and source lines that touch files, the network, or subprocesses. Flags tool descriptions that hide characters or contain instruction-like phrases such as "do not tell the user". |
 | Attribution | Places every event into exactly one bundle, or into the unmatched bucket. |
 | Side-effect rules | Six fixed rules name what happened. The rules cover spawned processes, modified files, credential access, network attempts, code loaded late, and exposed decoy secrets. |
 | Report | Writes `report.md` for people and `bundles.json` for machines. |
@@ -158,8 +158,9 @@ Each step ends in a run that a check script verifies against expected values:
 ## After v1
 
 1. An LLM judge that reads one tool-call bundle and answers "matches the claim", "does not match", or "unclear", citing event ids. It still gives no malicious score.
-2. A fake network mode, for servers whose interesting behavior starts after a connection succeeds.
+2. A proxied network mode through `mitmproxy`, which logs full request bodies so the decoy-secret search also covers HTTP and HTTPS traffic.
 3. Tracing the package install as its own detonation.
+4. Hooks that log environment variable reads inside Python and Node servers, labeled as weaker evidence than the trace.
 
 ## Planned usage
 
