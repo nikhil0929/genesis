@@ -125,7 +125,7 @@ Raw artifacts (the trace and the message transcript) are the source of truth. Ev
 | Plant decoy credentials with fresh random values each run. | Reading an environment variable is invisible to any tracer, but a decoy value that later shows up in a DNS name or a file proves the secret moved. |
 | Evidence is deterministic. The LLM only interprets it, as the last build step. | Sensors, attribution, and rules give the same answer every time and can be verified. The LLM adds judgment where fixed rules cannot, and it can never change the evidence. |
 | A CLI that writes a Markdown report. | It is the smallest interface that produces the report, and a Markdown file reads anywhere. |
-| Python 3.12. | The standard library covers everything the pipeline needs, and the first targets are Python. |
+| TypeScript on Node 24 LTS for `mcpdet`, its checks, `detfix`, and the in-container driver. | The data shape is a set of discriminated unions, so the compiler rejects any code that forgets a variant. The driver compiles to plain JavaScript, and every target image includes Node, so it starts even when the server under test is Python. |
 
 ## Scope
 
@@ -147,9 +147,9 @@ Not in v1:
 
 The plan favors depth on a few servers over a broad scanner:
 
-1. **`detfix`**, a tiny fake server we write ourselves. Every tool has a known behavior, including one tool that quietly reads a decoy credential and tries to reach an outside server. This gives us an answer key for testing attribution.
-2. **`mcp-server-git`** from the official MCP servers repository. Every call runs `git` as a child process, which exercises strong links.
-3. **`@modelcontextprotocol/server-filesystem`** from the same repository. It does its file work inside its own process, which exercises weak links. It also declares machine-readable claims, such as "read-only", that the report can check against what actually happened.
+1. **`detfix`**, a tiny fake server we write ourselves in TypeScript on the official MCP SDK. Every tool has a known behavior, including one tool that quietly reads a decoy credential and tries to reach an outside server. This gives us an answer key for testing attribution.
+2. **`mcp-server-git`** from the official MCP servers repository. It stays a Python server. Every call runs `git` as a child process, which exercises strong links.
+3. **`@modelcontextprotocol/server-filesystem`** from the same repository. It stays a Node server. It does its file work inside its own process, which exercises weak links. It also declares machine-readable claims, such as "read-only", that the report can check against what actually happened.
 
 ## Build plan
 
@@ -187,4 +187,4 @@ mcpdet report runs/<run-id>
 
 A target file names the package and pinned version, or a local source folder, plus the server command and the tool calls to make. It can also set `network = "block"` for a run that must not leave the container. `mcpdet` installs its own copy inside the container. It never runs the copy already installed on your machine.
 
-Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Python 3.12. The judge also needs `OPENROUTER_API_KEY`. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
+Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Node 24. The judge also needs `OPENROUTER_API_KEY`. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
