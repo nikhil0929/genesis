@@ -24,6 +24,8 @@ For each tool call, the report asks one question. Does what this call did match 
 
 It never answers "is this malicious?" There is no score and no verdict. A verdict hides the evidence, and the person reading the report needs the evidence. The report puts what the call did right next to what the tool said it would do, and the reader decides.
 
+An LLM judge then adds a second opinion per call, either "matches", "does not match", or "unclear", citing the exact events it relied on. The judge only reads finished evidence. It cannot add, remove, or change what the trace shows.
+
 ## How it works
 
 ```
@@ -81,6 +83,8 @@ The excerpt below is made up. It shows the shape of one tool-call section.
 > | Credential access | Opened `~/.aws/credentials` (a planted decoy) | Weak | No |
 > | Network attempt | DNS lookup of `akia7q2k…exfil.example`, then a blocked connect to 203.0.113.7 port 443 | Weak | No |
 > | Canary exposed | The decoy AWS key appeared inside that DNS name | Weak | No |
+>
+> **LLM opinion, not evidence.** Does not match. The tool claims only to count words, but events e212 and e219 read a credential file and send its key out in a DNS lookup.
 
 The reader does not need a verdict to see that this tool does something its description never mentions.
 
@@ -96,6 +100,7 @@ Each part of `mcpdet` has one job:
 | Static profile | Reads the installed package without running it. Lists dependencies, install scripts, tool descriptions, and source lines that touch files, the network, or subprocesses. Flags tool descriptions that hide characters or contain instruction-like phrases such as "do not tell the user". |
 | Attribution | Places every event into exactly one bundle, or into the unmatched bucket. |
 | Side-effect rules | Six fixed rules name what happened. The rules cover spawned processes, modified files, credential access, network attempts, code loaded late, and exposed decoy secrets. |
+| Judge | Asks an LLM, through OpenRouter, whether each tool call matches its claims. Every citation is checked against the bundle, and answers are saved so the report can be rebuilt identically. |
 | Report | Writes `report.md` for people and `bundles.json` for machines. |
 
 Raw artifacts (the trace and the message transcript) are the source of truth. Everything after them can be rebuilt with `mcpdet report` without running the server again.
@@ -110,7 +115,7 @@ Raw artifacts (the trace and the message transcript) are the source of truth. Ev
 | Call tools one at a time, with a one-second gap between calls. | Only one request is ever in flight, so call windows never overlap. The gap catches background work before the next call starts. |
 | The network is blocked, but every attempt is recorded. | Blocking is the safe default for untrusted code. The report still shows each destination, each DNS name, and which process tried. |
 | Plant decoy credentials with fresh random values each run. | Reading an environment variable is invisible to any tracer, but a decoy value that later shows up in a DNS name or a file proves the secret moved. |
-| No verdict and no LLM in v1. | The evidence has to be trustworthy before anything judges it. A deterministic pipeline is easier to verify and defend. |
+| Evidence is deterministic. The LLM only interprets it, as the last build step. | Sensors, attribution, and rules give the same answer every time and can be verified. The LLM adds judgment where fixed rules cannot, and it can never change the evidence. |
 | A CLI that writes a Markdown report. | It is the smallest interface that produces the report, and a Markdown file reads anywhere. |
 | Python 3.12. | The standard library covers everything the pipeline needs, and the first targets are Python. |
 
@@ -126,7 +131,7 @@ Not in v1:
 
 - Skills, and remote MCP servers reached over HTTP.
 - Malware scores, verdicts, and agent evals.
-- LLM features, such as an LLM that picks tool inputs or judges the results.
+- LLM-chosen tool inputs. Fixed inputs make two runs of the same server comparable.
 - Windows hosts, and servers that only run on macOS or Windows.
 - Tracing the package install itself. The report flags install scripts so the reader knows they ran unobserved.
 
@@ -147,6 +152,7 @@ Each step ends in a run that a check script verifies against expected values:
 3. **Add the static profile and the report.** Rebuilding the report from saved files gives byte-identical output.
 4. **Run `mcp-server-git`.** Every git tool shows its `git` child process as a strong link.
 5. **Run `server-filesystem`.** File writes appear as weak links, and a read outside the allowed folder is refused and never touches the decoy.
+6. **Add the LLM judge.** On `detfix`, the hidden-exfiltration tool gets "does not match" and the honest tool gets "matches". Every cited event exists. The pipeline still completes without an API key.
 
 ## Known limits
 
@@ -157,10 +163,9 @@ Each step ends in a run that a check script verifies against expected values:
 
 ## After v1
 
-1. An LLM judge that reads one tool-call bundle and answers "matches the claim", "does not match", or "unclear", citing event ids. It still gives no malicious score.
-2. A proxied network mode through `mitmproxy`, which logs full request bodies so the decoy-secret search also covers HTTP and HTTPS traffic.
-3. Tracing the package install as its own detonation.
-4. Hooks that log environment variable reads inside Python and Node servers, labeled as weaker evidence than the trace.
+1. A proxied network mode through `mitmproxy`, which logs full request bodies so the decoy-secret search also covers HTTP and HTTPS traffic.
+2. Tracing the package install as its own detonation.
+3. Hooks that log environment variable reads inside Python and Node servers, labeled as weaker evidence than the trace.
 
 ## Planned usage
 
@@ -173,4 +178,4 @@ mcpdet report runs/<run-id>
 
 A target file names the package and pinned version, or a local source folder, plus the server command and the tool calls to make. `mcpdet` installs its own copy inside the container. It never runs the copy already installed on your machine.
 
-Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Python 3.12.
+Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Python 3.12. The judge also needs `OPENROUTER_API_KEY`. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
