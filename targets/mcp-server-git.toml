@@ -1,0 +1,63 @@
+name = "mcp-server-git"
+base_image = "python:3.12-slim"
+install = [
+  "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git",
+  "python -m pip install --no-cache-dir .",
+]
+setup = [
+  "git init /work/repo",
+  "git -C /work/repo config user.name mcpdet",
+  "git -C /work/repo config user.email mcpdet@example.invalid",
+  "sh -c 'echo one > /work/repo/history.txt && git -C /work/repo add history.txt && git -C /work/repo commit -m one'",
+  "sh -c 'echo two >> /work/repo/history.txt && git -C /work/repo add history.txt && git -C /work/repo commit -m two'",
+  "sh -c 'echo three >> /work/repo/history.txt && git -C /work/repo add history.txt && git -C /work/repo commit -m three'",
+  "sh -c 'echo pending > /work/repo/pending.txt'",
+]
+source_path = "/opt/mcp-server-git"
+command = ["python", "-m", "mcp_server_git"]
+network = "block"
+
+[source]
+kind = "registry"
+ecosystem = "pypi"
+package = "mcp-server-git"
+version = "2026.8.18"
+
+[[scenario]]
+tool = "git_status"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+
+[[scenario]]
+tool = "git_log"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+
+[[scenario]]
+tool = "git_diff_unstaged"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+
+[[scenario]]
+tool = "git_add"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+files = ["pending.txt"]
+
+[[scenario]]
+tool = "git_commit"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+message = "four"
+
+[[scenario]]
+tool = "git_show"
+
+[scenario.arguments]
+repo_path = "/work/repo"
+revision = "HEAD"
