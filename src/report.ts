@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import {
   afterReply,
+  assertExactPlacement,
   CLOCK_TOLERANCE_US,
   clockPassed,
   descriptionTooLong,
@@ -15,6 +16,7 @@ import {
   parseJudgments,
   parseRun,
   parseStaticProfile,
+  parseTranscript,
   PREVIEW_LIMIT_BYTES,
   RULE_NAMES,
   shutdownEnd,
@@ -52,6 +54,11 @@ import type {
   UnmatchedReason,
   WriteTarget,
 } from "./model.js";
+import { attribute } from "./attribution.js";
+import { readEnvelope } from "./host-seal.js";
+import { applyRules } from "./rules.js";
+import { readSensors } from "./sensors/index.js";
+import { profileSources } from "./static-profile.js";
 
 function writeAtomic(directory: string, name: string, text: string): void {
   const temporary = join(directory, `.${name}.${process.pid}.tmp`);
@@ -1196,4 +1203,29 @@ export function renderReport(runDir: string): string {
   const markdown = render(run, profile, findings, judgments);
   writeAtomic(runDir, "report.md", markdown);
   return markdown;
+}
+
+export function publishRun(runDir: string): string {
+  const envelope = readEnvelope(runDir);
+  const sensed = readSensors(runDir, envelope.network);
+  const transcriptPath = join(runDir, "transcript.jsonl");
+  const timeline = parseTranscript(readFileSync(transcriptPath, "utf8"), transcriptPath);
+  const run = attribute({
+    events: sensed.events,
+    processes: sensed.processes,
+    timeline,
+    envelope,
+  });
+  const bundlesPath = join(runDir, "bundles.json");
+  const bundlesText = JSON.stringify(run);
+  writeAtomic(runDir, "bundles.json", bundlesText);
+  const parsed = parseRun(bundlesText, bundlesPath);
+  assertExactPlacement(sensed.events, parsed, bundlesPath);
+  const profile = profileSources(runDir);
+  const findings = applyRules(parsed, profile);
+  const findingsPath = join(runDir, "findings.json");
+  const findingsText = JSON.stringify(findings);
+  writeAtomic(runDir, "findings.json", findingsText);
+  parseFindings(findingsText, findingsPath, parsed);
+  return renderReport(runDir);
 }
