@@ -29,6 +29,7 @@ import {
   parsePlan,
 } from "./model.js";
 import type { Canary, ProxyFlow, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
+import { writeHostSeal } from "./host-seal.js";
 
 export type RunEnvelope = {
   readonly runId: string;
@@ -529,6 +530,7 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
         throw new Error(String(unreachable));
       }
     }
+    writeHostSeal(runDir, { image_id: imageId, source_path: target.source.path });
     return {
       runDir,
       transcriptPath: join(runDir, "transcript.jsonl"),
