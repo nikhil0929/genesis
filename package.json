@@ -19,6 +19,9 @@
   "files": [
     "dist"
   ],
+  "workspaces": [
+    "fixtures/detfix"
+  ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
