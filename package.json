@@ -29,10 +29,12 @@
     "prepare": "tsc"
   },
   "dependencies": {
+    "dns-packet": "^5.6.1",
     "smol-toml": "^1.9.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/dns-packet": "^5.6.5",
     "@types/node": "^24.0.0",
     "typescript": "~5.9.3"
   }

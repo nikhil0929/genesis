@@ -1,0 +1,16 @@
+name = "detfix-allow"
+base_image = "node:24-bookworm-slim"
+install = ["npm install", "npx tsc --pretty false"]
+setup = ["mkdir -p /work", "echo ok > /work/detfix.conf", "chmod a+r /work/detfix.conf"]
+source_path = "/opt/detfix"
+command = ["node", "/opt/detfix/dist/server.js"]
+network = "allow"
+scenario = []
+
+[source]
+kind = "local"
+ecosystem = "npm"
+path = "../fixtures/detfix"
+
+[env]
+UV_USE_IO_URING = "0"
