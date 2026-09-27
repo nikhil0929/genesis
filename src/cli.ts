@@ -7,6 +7,10 @@ import type { Target } from "./model.js";
 import { publishRun } from "./report.js";
 import { traceTarget } from "./sandbox.js";
 
+type Command =
+  | { readonly kind: "detonate"; readonly targetPath: string; readonly mode: "skip" | "if_absent" }
+  | { readonly kind: "report"; readonly runDir: string; readonly mode: "if_absent" | "again" };
+
 function withWorkingSource(target: Target, targetPath: string): Target {
   if (target.source.kind !== "local") return target;
   const absolute = resolve(dirname(resolve(targetPath)), target.source.path);
@@ -16,18 +20,35 @@ function withWorkingSource(target: Target, targetPath: string): Target {
   };
 }
 
-export async function detonateCommand(targetPath: string): Promise<string> {
+export function parseCommand(argv: readonly string[]): Command {
+  const [command, path, flag, extra] = argv;
+  if (extra !== undefined || path === undefined) throw new Error("usage");
+  switch (command) {
+    case "detonate":
+      if (flag === undefined) return { kind: "detonate", targetPath: path, mode: "if_absent" };
+      if (flag === "--no-judge") return { kind: "detonate", targetPath: path, mode: "skip" };
+      throw new Error("usage");
+    case "report":
+      if (flag === undefined) return { kind: "report", runDir: path, mode: "if_absent" };
+      if (flag === "--rejudge") return { kind: "report", runDir: path, mode: "again" };
+      throw new Error("usage");
+    default:
+      throw new Error("usage");
+  }
+}
+
+export async function detonateCommand(targetPath: string, mode: "skip" | "if_absent"): Promise<string> {
   const absolute = resolve(targetPath);
   const text = readFileSync(absolute, "utf8");
   const target = withWorkingSource(parseTarget(text, absolute), absolute);
   const traced = await traceTarget(target);
   copyFileSync(absolute, join(traced.runDir, "target.toml"));
-  publishRun(traced.runDir);
+  await publishRun(traced.runDir, mode);
   return traced.runDir;
 }
 
-export function reportCommand(runDir: string): void {
-  publishRun(resolve(runDir));
+export async function reportCommand(runDir: string, mode: "if_absent" | "again"): Promise<void> {
+  await publishRun(resolve(runDir), mode);
 }
 
 function fail(error: unknown): void {
@@ -37,22 +58,29 @@ function fail(error: unknown): void {
 
 const entry = process.argv[1];
 if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
-  const [command, arg, extra] = process.argv.slice(2);
-  if (extra !== undefined || arg === undefined || (command !== "detonate" && command !== "report")) {
-    process.stderr.write("usage: mcpdet detonate <target.toml>\n       mcpdet report <run-dir>\n");
+  let command: Command;
+  try {
+    command = parseCommand(process.argv.slice(2));
+  } catch {
+    process.stderr.write(
+      "usage: mcpdet detonate <target.toml> [--no-judge]\n       mcpdet report <run-dir> [--rejudge]\n",
+    );
     process.exit(1);
   }
-  if (command === "report") {
-    try {
-      reportCommand(arg);
-    } catch (error) {
-      fail(error);
+  switch (command.kind) {
+    case "detonate":
+      detonateCommand(command.targetPath, command.mode)
+        .then((runDir) => {
+          process.stdout.write(`${runDir}\n`);
+        })
+        .catch(fail);
+      break;
+    case "report":
+      reportCommand(command.runDir, command.mode).catch(fail);
+      break;
+    default: {
+      const unreachable: never = command;
+      fail(unreachable);
     }
-  } else {
-    detonateCommand(arg)
-      .then((runDir) => {
-        process.stdout.write(`${runDir}\n`);
-      })
-      .catch(fail);
   }
 }

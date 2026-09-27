@@ -56,6 +56,8 @@ import type {
 } from "./model.js";
 import { attribute } from "./attribution.js";
 import { readEnvelope } from "./host-seal.js";
+import { judgeRun } from "./judge.js";
+import type { JudgeMode } from "./judge.js";
 import { applyRules } from "./rules.js";
 import { readSensors } from "./sensors/index.js";
 import { profileSources } from "./static-profile.js";
@@ -1205,7 +1207,7 @@ export function renderReport(runDir: string): string {
   return markdown;
 }
 
-export function publishRun(runDir: string): string {
+export async function publishRun(runDir: string, mode: JudgeMode): Promise<string> {
   const envelope = readEnvelope(runDir);
   const sensed = readSensors(runDir, envelope.network);
   const transcriptPath = join(runDir, "transcript.jsonl");
@@ -1227,5 +1229,6 @@ export function publishRun(runDir: string): string {
   const findingsText = JSON.stringify(findings);
   writeAtomic(runDir, "findings.json", findingsText);
   parseFindings(findingsText, findingsPath, parsed);
+  await judgeRun(runDir, parsed, profile, findings, mode);
   return renderReport(runDir);
 }
