@@ -1,0 +1,36 @@
+{
+  "name": "mcpdet",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Detonate one local MCP server in a disposable container and report what each tool call did.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "mcpdet": "dist/src/cli.js"
+  },
+  "exports": {
+    "./model": {
+      "types": "./dist/src/model.d.ts",
+      "default": "./dist/src/model.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc && node dist/checks/contract.js",
+    "prepare": "tsc"
+  },
+  "dependencies": {
+    "smol-toml": "^1.9.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3"
+  }
+}
