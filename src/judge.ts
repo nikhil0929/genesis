@@ -1,7 +1,7 @@
 import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseJudgments } from "./model.js";
+import { parseJudgeAnswer, parseJudgments } from "./model.js";
 import type {
   EventId,
   Finding,
@@ -14,7 +14,39 @@ import type {
 
 export type JudgeMode = "skip" | "if_absent" | "again";
 
-const JUDGE_MODEL = "UNSET";
+const JUDGE_MODEL = "openai/gpt-4.1-mini";
+
+const JUDGE_SYSTEM =
+  "The question is whether what the call did matches what the tool claims. Citations must be event ids from the brief. The answer is not a maliciousness score.";
+
+const JUDGE_RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "judge_answer",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        opinion: { type: "string", enum: ["matches", "does_not_match", "unclear"] },
+        mismatches: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              event_ids: { type: "array", items: { type: "string" } },
+              explanation: { type: "string" },
+            },
+            required: ["event_ids", "explanation"],
+          },
+        },
+        summary: { type: "string" },
+      },
+      required: ["opinion", "mismatches", "summary"],
+    },
+  },
+} as const;
 
 type JudgeBrief = {
   readonly call: ToolCallBundle;
@@ -86,8 +118,62 @@ function promptFor(brief: JudgeBrief): string {
   });
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function assistantContent(body: string): string {
+  const root = record(JSON.parse(body));
+  const choices = root?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) throw new Error("completion has no choices");
+  const message = record(record(choices[0])?.message);
+  const content = message?.content;
+  if (typeof content !== "string") throw new Error("assistant content is not a string");
+  return content;
+}
+
+async function requestJudgment(brief: JudgeBrief, citable: ReadonlySet<EventId>): Promise<ModelReply> {
+  let raw_text = "";
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY ?? ""}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: JUDGE_MODEL,
+        temperature: 0,
+        messages: [
+          { role: "system", content: JUDGE_SYSTEM },
+          { role: "user", content: promptFor(brief) },
+        ],
+        response_format: JUDGE_RESPONSE_FORMAT,
+      }),
+    });
+    raw_text = await response.text();
+    if (!response.ok) return { kind: "invalid", raw_text, error: `HTTP ${String(response.status)}` };
+    const content = assistantContent(raw_text);
+    raw_text = content;
+    return { kind: "answer", answer: parseJudgeAnswer(content, "judge", citable) };
+  } catch (error) {
+    return { kind: "invalid", raw_text, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function askModel(brief: JudgeBrief, citable: ReadonlySet<EventId>): Promise<ModelReply> {
-  throw new Error("not implemented", { cause: { prompt: promptFor(brief), citable: citable.size } });
+  const first = await requestJudgment(brief, citable);
+  switch (first.kind) {
+    case "answer":
+      return first;
+    case "invalid":
+      return requestJudgment(brief, citable);
+    default: {
+      const unreachable: never = first;
+      throw new Error(String(unreachable));
+    }
+  }
 }
 
 function writeJudgments(runDir: string, run: Run, judgments: readonly unknown[]): void {
