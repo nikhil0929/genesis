@@ -30,7 +30,18 @@ import {
   toolCallSeq,
   windowEnd,
 } from "../src/model.js";
-import type { EventId, Finding, Link, LinkStrength, Micros, Pid, Run, ToolCallEntry } from "../src/model.js";
+import type {
+  DriverTimelineEntry,
+  EventId,
+  Finding,
+  Link,
+  LinkStrength,
+  Micros,
+  Pid,
+  Run,
+  TimelineEntry,
+  ToolCallEntry,
+} from "../src/model.js";
 
 function expectBoundary(run: () => unknown, source: string, line: number | null, detail: string): void {
   assert.throws(run, (error: unknown) => {
@@ -575,6 +586,31 @@ function checkIllegalRun(text: string): void {
     null,
     "✖ duplicate call_id 1",
   );
+
+  expectBoundary(
+    () => parseRun(edit(text, ["tool_calls", 0, "events", 0, "link", "ancestor_pid"], 999), "bundles.json"),
+    "bundles.json",
+    null,
+    "✖ event e2 is owned by pid 999, which call 1 did not start",
+  );
+  expectBoundary(
+    () => parseRun(edit(text, ["tool_calls", 0, "events", 0, "link", "ancestor_pid"], 400), "bundles.json"),
+    "bundles.json",
+    null,
+    "✖ event e2 is owned by pid 400, which call 1 did not start",
+  );
+  expectBoundary(
+    () => parseRun(edit(text, ["tool_calls", 0, "owned_processes", 0, "pid"], 400), "bundles.json"),
+    "bundles.json",
+    null,
+    "✖ owned process 400 was not started by call 1",
+  );
+  expectBoundary(
+    () => parseRun(edit(text, ["shutdown", "events", 2, "link", "ancestor_pid"], 200), "bundles.json"),
+    "bundles.json",
+    null,
+    "✖ event e11 is owned by pid 200, which shutdown did not start",
+  );
 }
 
 function checkEvents(run: Run): void {
@@ -759,8 +795,8 @@ function checkDocuments(run: Run): void {
     "✖ process key 999 does not match pid 100",
   );
 
-  const findings = parseFindings(JSON.stringify(findingsDocument), "findings.json");
-  assert.deepEqual(parseFindings(JSON.stringify(findings), "findings.json"), findings);
+  const findings = parseFindings(JSON.stringify(findingsDocument), "findings.json", run);
+  assert.deepEqual(parseFindings(JSON.stringify(findings), "findings.json", run), findings);
   const startupFinding = findings[0];
   const weakFinding = findings[1];
   const strongFinding = findings[2];
@@ -782,7 +818,7 @@ function checkDocuments(run: Run): void {
   assert.equal(Object.hasOwn(weakFinding, "strength"), false);
 
   expectBoundary(
-    () => parseFindings(JSON.stringify([{ ...findingsDocument[0], evidence: [] }]), "findings.json"),
+    () => parseFindings(JSON.stringify([{ ...findingsDocument[0], evidence: [] }]), "findings.json", run),
     "findings.json",
     null,
     "✖ Invalid input: expected string, received undefined\n  → at [0].evidence[0]",
@@ -852,12 +888,13 @@ function checkDocuments(run: Run): void {
       },
     ]),
     "judgments.json",
+    run,
   );
   assert.equal(judgments[0]?.kind, "answer");
   if (judgments[0]?.kind !== "answer") throw new Error("fixture");
   assert.equal(judgments[0].answer.opinion, "does_not_match");
   assert.equal(judgments[0].answer.summary, "The call did more than count words.");
-  assert.deepEqual(parseJudgments(JSON.stringify(judgments), "judgments.json"), judgments);
+  assert.deepEqual(parseJudgments(JSON.stringify(judgments), "judgments.json", run), judgments);
 
   const startupEvent = run.startup.events[0];
   if (startupEvent === undefined) throw new Error("fixture");
@@ -1021,12 +1058,83 @@ function rejectMissingVariant(link: Link): LinkStrength {
   }
 }
 
+function driverWritesPlainNumbers(closedAt: number): DriverTimelineEntry {
+  return { kind: "stdin_closed", t_us: closedAt };
+}
+
+function rejectUnbrandedTimelineEntry(closedAt: number): TimelineEntry {
+  // @ts-expect-error a domain timeline entry needs a parsed Micros
+  return { kind: "stdin_closed", t_us: closedAt };
+}
+
+function checkCitations(run: Run): void {
+  const cited = findingsDocument[1];
+  if (cited === undefined) throw new Error("fixture");
+  expectBoundary(
+    () => parseFindings(JSON.stringify([{ ...cited, evidence: ["e4", "e99"] }]), "findings.json", run),
+    "findings.json",
+    null,
+    "finding 0 cites events outside its bundle: e99",
+  );
+  expectBoundary(
+    () => parseFindings(JSON.stringify([{ ...cited, evidence: ["e1"] }]), "findings.json", run),
+    "findings.json",
+    null,
+    "finding 0 cites events outside its bundle: e1",
+  );
+  expectBoundary(
+    () => parseFindings(JSON.stringify([{ ...cited, call_id: 9 }]), "findings.json", run),
+    "findings.json",
+    null,
+    "finding 0 names a call that is not in the run",
+  );
+
+  const judgment = {
+    kind: "answer",
+    call_id: 1,
+    model: "example-judge",
+    answered_at_us: 9_000_000,
+    answer: {
+      opinion: "does_not_match",
+      mismatches: [{ event_ids: ["e4"], explanation: "It connected out." }],
+      summary: "The call did more than count words.",
+    },
+  };
+  expectBoundary(
+    () => parseJudgments(JSON.stringify([{ ...judgment, call_id: 9 }]), "judgments.json", run),
+    "judgments.json",
+    null,
+    "judgment names call 9, which is not in the run",
+  );
+  expectBoundary(
+    () => parseJudgments(JSON.stringify([judgment, judgment]), "judgments.json", run),
+    "judgments.json",
+    null,
+    "call 1 has two judgments",
+  );
+  expectBoundary(
+    () =>
+      parseJudgments(
+        JSON.stringify([
+          { ...judgment, answer: { ...judgment.answer, mismatches: [{ event_ids: ["e1"], explanation: "Startup." }] } },
+        ]),
+        "judgments.json",
+        run,
+      ),
+    "judgments.json",
+    null,
+    "judgment for call 1 cites events outside the bundle: e1",
+  );
+}
+
 const compileTimeGuards = [
   rejectPidAsMicros,
   rejectOverlapAfterReply,
   rejectEmptyEvidence,
   rejectReadonlyWrite,
   rejectMissingVariant,
+  driverWritesPlainNumbers,
+  rejectUnbrandedTimelineEntry,
 ];
 void compileTimeGuards;
 
@@ -1036,14 +1144,4 @@ checkEvents(run);
 checkTarget();
 checkDocuments(run);
 
-const cited = findingsDocument[1];
-if (cited === undefined) throw new Error("fixture");
-const missingEvidence = parseFindings(JSON.stringify([{ ...cited, evidence: ["e99"] }]), "findings.json");
-const missingFinding = missingEvidence[0];
-if (missingFinding === undefined) throw new Error("fixture");
-expectBoundary(
-  () => findingStrength(run, missingFinding),
-  "bundles.json",
-  null,
-  "evidence e99 is not in the finding's bundle",
-);
+checkCitations(run);

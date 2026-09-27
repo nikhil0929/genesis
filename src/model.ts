@@ -320,6 +320,9 @@ export type StdinClosed = Out<typeof stdinClosedSchema>;
 export type ServerExited = Out<typeof serverExitedSchema>;
 export type TimelineEntry = Out<typeof timelineEntrySchema>;
 
+/** The line the in-container driver writes. It carries plain numbers because the driver cannot import zod to brand them. */
+export type DriverTimelineEntry = DeepReadonly<z.input<typeof timelineEntrySchema>>;
+
 export function parseTranscript(text: string, source: string): readonly TimelineEntry[] {
   return parseLines(timelineEntrySchema, text, source);
 }
@@ -729,9 +732,7 @@ export type Event = Out<typeof eventSchema>;
 export function parseEvents(text: string, source: string): readonly Event[] {
   const events = parseLines(eventSchema, text, source);
   const seen = new Set<string>();
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index];
-    if (event === undefined) continue;
+  for (const [index, event] of events.entries()) {
     if (seen.has(event.event_id)) {
       throw new BoundaryError(source, index + 1, `event ${event.event_id} appears twice in the trace`);
     }
@@ -843,24 +844,22 @@ export type AttributedRootProcess = Out<typeof attributedRootSchema>;
 export type AttributedChildProcess = Out<typeof attributedChildSchema>;
 export type AttributedProcess = Out<typeof attributedProcessSchema>;
 
-function keyedProcesses<T extends z.ZodType>(record: T) {
+// A cross-field check reads fields that may have failed their own schema, so it runs only on an issue-free value.
+const wellFormed = { when: (payload: { readonly issues: readonly unknown[] }) => payload.issues.length === 0 };
+
+function keyedProcesses<T extends z.ZodType<{ readonly pid: number; readonly kind: string }>>(record: T) {
   return z.record(pidKeySchema, record).superRefine((table, ctx) => {
     let roots = 0;
-    for (const [key, process] of Object.entries(table)) {
-      if (typeof process !== "object" || process === null || !("pid" in process) || !("kind" in process)) {
-        continue;
+    for (const [key, process] of Object.entries<{ readonly pid: number; readonly kind: string }>(table)) {
+      if (key !== String(process.pid)) {
+        ctx.addIssue({ code: "custom", message: `process key ${key} does not match pid ${String(process.pid)}` });
       }
-      const { pid, kind } = process;
-      if (typeof pid !== "number" || typeof kind !== "string") continue;
-      if (key !== String(pid)) {
-        ctx.addIssue({ code: "custom", message: `process key ${key} does not match pid ${String(pid)}` });
-      }
-      if (kind === "root") roots += 1;
+      if (process.kind === "root") roots += 1;
     }
     if (roots !== 1) {
       ctx.addIssue({ code: "custom", message: "expected exactly one root process" });
     }
-  });
+  }, wellFormed);
 }
 
 const sensorProcessesSchema = keyedProcesses(processRecordSchema);
@@ -1021,6 +1020,7 @@ const shutdownBundleSchema = z.strictObject({
   killed_at_teardown: z.array(pidSchema),
 });
 export type ShutdownBundle = Out<typeof shutdownBundleSchema>;
+export type Bundle = StartupBundle | ToolCallBundle | ShutdownBundle;
 
 export function outcomeTime(call: ToolCallBundle): Micros {
   return instant(call.sent_us + call.outcome.duration_us);
@@ -1103,7 +1103,7 @@ const runNetworkSchema = z.discriminatedUnion("kind", [allowNetworkSchema, block
 
 // Whether the check passed is clockPassed. The boolean is max_violation_us <= 5ms.
 const clockCheckSchema = z.strictObject({
-  max_violation_us: microsSchema,
+  max_violation_us: durationSchema,
   responses_checked: z.int().nonnegative(),
 });
 
@@ -1139,17 +1139,37 @@ const runSchema = z
       }
       seenCalls.add(call.call_id);
     }
-    const outside = (tUs: number, startUs: number, durationUs: number): boolean => {
-      if (durationUs < 0) return false;
-      return tUs < startUs || tUs >= startUs + durationUs;
+    const outside = (tUs: number, startUs: number, durationUs: number): boolean =>
+      tUs < startUs || tUs >= startUs + durationUs;
+    const childOwner = (pid: number): ProcessOwner | null => {
+      const process = run.processes[String(pid)];
+      return process?.kind === "child" ? process.owner : null;
     };
     for (const call of run.tool_calls) {
+      const startedByCall = (pid: number): boolean => {
+        const owner = childOwner(pid);
+        return owner?.kind === "call" && owner.call_id === call.call_id;
+      };
       for (const entry of call.events) {
-        if (entry.link.kind !== "overlap") continue;
-        if (outside(entry.event.t_us, call.sent_us, call.outcome.duration_us)) {
+        if (entry.link.kind === "overlap") {
+          if (outside(entry.event.t_us, call.sent_us, call.outcome.duration_us)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `event ${entry.event.event_id} is overlap but falls outside the call window`,
+            });
+          }
+        } else if (!startedByCall(entry.link.ancestor_pid)) {
           ctx.addIssue({
             code: "custom",
-            message: `event ${entry.event.event_id} is overlap but falls outside the call window`,
+            message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which call ${String(call.call_id)} did not start`,
+          });
+        }
+      }
+      for (const owned of call.owned_processes) {
+        if (!startedByCall(owned.pid)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `owned process ${String(owned.pid)} was not started by call ${String(call.call_id)}`,
           });
         }
       }
@@ -1163,11 +1183,17 @@ const runSchema = z
       }
     }
     for (const entry of run.shutdown.events) {
-      if (entry.link.kind !== "phase") continue;
-      if (outside(entry.event.t_us, run.shutdown.trigger.t_us, run.shutdown.duration_us)) {
+      if (entry.link.kind === "phase") {
+        if (outside(entry.event.t_us, run.shutdown.trigger.t_us, run.shutdown.duration_us)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `event ${entry.event.event_id} is phase but falls outside the shutdown window`,
+          });
+        }
+      } else if (childOwner(entry.link.ancestor_pid)?.kind !== "shutdown") {
         ctx.addIssue({
           code: "custom",
-          message: `event ${entry.event.event_id} is phase but falls outside the shutdown window`,
+          message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which shutdown did not start`,
         });
       }
     }
@@ -1190,7 +1216,7 @@ const runSchema = z
     }
     for (const entry of run.shutdown.events) visit(entry.event);
     for (const entry of run.unmatched) visit(entry.event);
-  });
+  }, wellFormed);
 
 export type Run = Out<typeof runSchema>;
 
@@ -1313,56 +1339,63 @@ export type ShutdownFinding = Out<typeof shutdownFindingSchema>;
 export type UnmatchedFinding = Out<typeof unmatchedFindingSchema>;
 export type Finding = Out<typeof findingSchema>;
 
-export function parseFindings(text: string, source: string): readonly Finding[] {
-  return parseWith(findingsSchema, decodeJson(text, source, null), source, null);
+type CitableLinks = ReadonlyMap<string, Link | null>;
+
+function linksOf(entries: readonly { readonly event: Event; readonly link: Link }[]): CitableLinks {
+  return new Map(entries.map((entry) => [entry.event.event_id, entry.link]));
 }
 
-function linksForEvidence(
-  entries: readonly { readonly event: Event; readonly link: Link }[],
-  evidence: readonly [EventId, ...EventId[]],
-): readonly Link[] {
-  const byId = new Map<string, Link>();
-  for (const entry of entries) byId.set(entry.event.event_id, entry.link);
-  const links: Link[] = [];
-  for (const id of evidence) {
-    const link = byId.get(id);
-    if (link === undefined) {
-      throw new BoundaryError("bundles.json", null, `evidence ${id} is not in the finding's bundle`);
-    }
-    links.push(link);
-  }
-  return links;
+function callLinks(run: Run, callId: CallId): CitableLinks | null {
+  const call = run.tool_calls.find((item) => item.call_id === callId);
+  return call === undefined ? null : linksOf(call.events);
 }
 
-function strongest(links: readonly Link[]): LinkStrength {
-  let strength: LinkStrength = "weak";
-  for (const link of links) {
-    if (linkStrength(link) === "strong") strength = "strong";
-  }
-  return strength;
-}
-
-/** The strongest link among the finding's evidence. Unmatched events have no link, so the result is null. */
-export function findingStrength(run: Run, finding: Finding): LinkStrength | null {
+function citableLinks(run: Run, finding: Finding): CitableLinks | null {
   switch (finding.kind) {
-    case "unmatched":
-      return null;
     case "startup":
-      return strongest(linksForEvidence(run.startup.events, finding.evidence));
+      return linksOf(run.startup.events);
+    case "call":
+      return callLinks(run, finding.call_id);
     case "shutdown":
-      return strongest(linksForEvidence(run.shutdown.events, finding.evidence));
-    case "call": {
-      const call = run.tool_calls.find((item) => item.call_id === finding.call_id);
-      if (call === undefined) {
-        throw new BoundaryError("bundles.json", null, `finding cites call ${String(finding.call_id)} which is not in the run`);
-      }
-      return strongest(linksForEvidence(call.events, finding.evidence));
-    }
+      return linksOf(run.shutdown.events);
+    case "unmatched":
+      return new Map(run.unmatched.map((entry) => [entry.event.event_id, null]));
     default: {
       const _exhaustive: never = finding;
       return _exhaustive;
     }
   }
+}
+
+function uncited(ids: readonly EventId[], citable: { has(id: string): boolean }): EventId[] {
+  return ids.filter((id) => !citable.has(id));
+}
+
+/** Rejects a finding whose call is not in the run or whose evidence is outside its bundle. */
+export function parseFindings(text: string, source: string, run: Run): readonly Finding[] {
+  const findings = parseWith(findingsSchema, decodeJson(text, source, null), source, null);
+  for (const [index, finding] of findings.entries()) {
+    const citable = citableLinks(run, finding);
+    if (citable === null) {
+      throw new BoundaryError(source, null, `finding ${index} names a call that is not in the run`);
+    }
+    const outside = uncited(finding.evidence, citable);
+    if (outside.length > 0) {
+      throw new BoundaryError(source, null, `finding ${index} cites events outside its bundle: ${outside.join(", ")}`);
+    }
+  }
+  return findings;
+}
+
+/** The strongest link among the finding's evidence. Unmatched events have no link, so the result is null. */
+export function findingStrength(run: Run, finding: Finding): LinkStrength | null {
+  if (finding.kind === "unmatched") return null;
+  const citable = citableLinks(run, finding);
+  const strong = finding.evidence.some((id) => {
+    const link = citable?.get(id);
+    return link != null && linkStrength(link) === "strong";
+  });
+  return strong ? "strong" : "weak";
 }
 
 // --- Static profile ---------------------------------------------------------
@@ -1472,18 +1505,40 @@ export type AnswerJudgment = Out<typeof answerJudgmentSchema>;
 export type InvalidJudgment = Out<typeof invalidJudgmentSchema>;
 export type Judgment = Out<typeof judgmentSchema>;
 
-export function parseJudgments(text: string, source: string): readonly Judgment[] {
-  return parseWith(judgmentsSchema, decodeJson(text, source, null), source, null);
+function answerCitations(answer: JudgeAnswer): EventId[] {
+  return answer.mismatches.flatMap((mismatch) => [...mismatch.event_ids]);
+}
+
+/** Rejects a judgment for a call that is not in the run, a second judgment for one call, and an invented citation. */
+export function parseJudgments(text: string, source: string, run: Run): readonly Judgment[] {
+  const judgments = parseWith(judgmentsSchema, decodeJson(text, source, null), source, null);
+  const judged = new Set<number>();
+  for (const judgment of judgments) {
+    const citable = callLinks(run, judgment.call_id);
+    if (citable === null) {
+      throw new BoundaryError(source, null, `judgment names call ${String(judgment.call_id)}, which is not in the run`);
+    }
+    if (judged.has(judgment.call_id)) {
+      throw new BoundaryError(source, null, `call ${String(judgment.call_id)} has two judgments`);
+    }
+    judged.add(judgment.call_id);
+    if (judgment.kind === "answer") {
+      const invented = uncited(answerCitations(judgment.answer), citable);
+      if (invented.length > 0) {
+        throw new BoundaryError(
+          source,
+          null,
+          `judgment for call ${String(judgment.call_id)} cites events outside the bundle: ${invented.join(", ")}`,
+        );
+      }
+    }
+  }
+  return judgments;
 }
 
 export function parseJudgeAnswer(text: string, source: string, citable: ReadonlySet<EventId>): JudgeAnswer {
   const answer = parseWith(judgeAnswerSchema, decodeJson(text, source, null), source, null);
-  const invented: EventId[] = [];
-  for (const mismatch of answer.mismatches) {
-    for (const id of mismatch.event_ids) {
-      if (!citable.has(id)) invented.push(id);
-    }
-  }
+  const invented = uncited(answerCitations(answer), citable);
   if (invented.length > 0) {
     throw new BoundaryError(source, null, `cites events outside the bundle: ${invented.join(", ")}`);
   }
