@@ -1,9 +1,10 @@
 import { decode } from "dns-packet";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { BoundaryError, CLOCK_TOLERANCE_US, parseEvents, parseProcesses } from "../model.js";
 import type { Event, ProxyFlow, RunNetwork, SensorProcesses } from "../model.js";
+import { rawPath } from "../run-dir.js";
 
 export type SensorTrace = {
   readonly events: readonly Event[];
@@ -1000,28 +1001,20 @@ function annotateNet(events: Annotatable[], network: RunNetwork): void {
   for (const event of events) {
     const flowId = event.body.proxy_flow_id;
     if (typeof flowId !== "string") continue;
-    if (seen.has(flowId)) throw new BoundaryError("events.jsonl", null, `proxy flow ${flowId} is claimed twice`);
+    if (seen.has(flowId)) throw new BoundaryError("events", null, `proxy flow ${flowId} is claimed twice`);
     seen.add(flowId);
   }
 }
 
 export function readSensors(runDir: string, network: RunNetwork): SensorTrace {
-  const calls = traceFiles(join(runDir, "trace")).flatMap((file) => parseFile(file.file, file.tid, file.text));
+  const calls = traceFiles(rawPath(runDir, "trace")).flatMap((file) => parseFile(file.file, file.tid, file.text));
   const sorted = [...calls].sort((left, right) => left.tUs - right.tUs || left.tid - right.tid || left.line - right.line);
   annotateNet(
     sorted.map((call) => ({ body: call.body, tUs: call.tUs, capture: call.capture })),
     network,
   );
   const built = buildTrace(sorted);
-  const eventsPath = join(runDir, "events.jsonl");
-  const processesPath = join(runDir, "processes.json");
-  const events = parseEvents(
-    built.events.map((event) => JSON.stringify(event)).join("\n") + (built.events.length > 0 ? "\n" : ""),
-    eventsPath,
-  );
-  const processes = parseProcesses(JSON.stringify(built.processes), processesPath);
-  const eventsText = events.map((event) => JSON.stringify(event)).join("\n");
-  writeFileSync(eventsPath, events.length > 0 ? `${eventsText}\n` : "");
-  writeFileSync(processesPath, JSON.stringify(processes));
+  const events = parseEvents(built.events.map((event) => JSON.stringify(event)).join("\n"), "events");
+  const processes = parseProcesses(JSON.stringify(built.processes), "processes");
   return { events, processes };
 }

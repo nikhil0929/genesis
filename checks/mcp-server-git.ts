@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseFindings, parseRun, parseStaticProfile } from "../src/model.js";
+import { parseFindings, parseRun } from "../src/model.js";
+import { profileSources } from "../src/static-profile.js";
 import type { Finding, Run, ToolCallBundle } from "../src/model.js";
 
 const scenarioGit: readonly { readonly tool: string; readonly subcommand: string }[] = [
@@ -71,10 +72,9 @@ assert.ok(runDir.startsWith(join(root, "runs")), runDir);
 
 const bundlesPath = join(runDir, "bundles.json");
 const findingsPath = join(runDir, "findings.json");
-const profilePath = join(runDir, "static_profile.json");
 const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);
 const findings = parseFindings(readFileSync(findingsPath, "utf8"), findingsPath, run);
-const profile = parseStaticProfile(readFileSync(profilePath, "utf8"), profilePath);
+const profile = profileSources(runDir);
 
 for (const row of scenarioGit) {
   assertOwnedGit(scenarioCall(run, row.tool), row.subcommand);

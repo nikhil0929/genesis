@@ -1,10 +1,11 @@
 import { copyFileSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { parseTarget } from "./model.js";
 import type { Target } from "./model.js";
 import { publishRun } from "./report.js";
+import { rawPath } from "./run-dir.js";
 import { traceTarget } from "./sandbox.js";
 
 type Command =
@@ -42,7 +43,7 @@ export async function detonateCommand(targetPath: string, mode: "skip" | "if_abs
   const text = readFileSync(absolute, "utf8");
   const target = withWorkingSource(parseTarget(text, absolute), absolute);
   const traced = await traceTarget(target);
-  copyFileSync(absolute, join(traced.runDir, "target.toml"));
+  copyFileSync(absolute, rawPath(traced.runDir, "target.toml"));
   await publishRun(traced.runDir, mode);
   return traced.runDir;
 }

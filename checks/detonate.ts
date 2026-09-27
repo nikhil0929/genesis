@@ -10,10 +10,11 @@ import {
   clockPassed,
   outlivedReply,
   ownedProcesses,
-  parseEvents,
   parseRun,
 } from "../src/model.js";
 import type { Event, ToolCallBundle } from "../src/model.js";
+import { readEnvelope } from "../src/host-seal.js";
+import { readSensors } from "../src/sensors/index.js";
 
 function isFileWrite(event: Event): boolean {
   switch (event.body.kind) {
@@ -116,9 +117,8 @@ const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", "targ
 assert.equal(result.status, 0, result.stderr || result.stdout);
 const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
 const bundlesPath = join(runDir, "bundles.json");
-const eventsPath = join(runDir, "events.jsonl");
 const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);
-const events = parseEvents(readFileSync(eventsPath, "utf8"), eventsPath);
+const { events } = readSensors(runDir, readEnvelope(runDir).network);
 
 const echo = callNamed(run.tool_calls, "echo");
 for (const entry of echo.events) {

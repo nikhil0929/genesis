@@ -51,8 +51,8 @@ try {
   });
   assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
   const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
-  assert.equal(existsSync(join(runDir, "source", "pyproject.toml")), true);
-  const host: unknown = JSON.parse(readFileSync(join(runDir, "host.json"), "utf8"));
+  assert.equal(existsSync(join(runDir, "raw", "source", "pyproject.toml")), true);
+  const host: unknown = JSON.parse(readFileSync(join(runDir, "raw", "host.json"), "utf8"));
   assert.equal(sourcePath(host), "registry/pypi/mcp-server-git/2026.8.18");
   const bundlesPath = join(runDir, "bundles.json");
   const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);

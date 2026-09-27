@@ -1,10 +1,11 @@
-import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 
 import { parse as parseToml, TomlError } from "smol-toml";
 
 import { BoundaryError, parseStaticProfile, parseToolsPage, parseTranscript } from "./model.js";
 import type { ApiHintCategory, StaticProfile, ToolDefinition } from "./model.js";
+import { rawPath } from "./run-dir.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -48,12 +49,6 @@ const HINT_PATTERNS: readonly {
   { category: "platform", language: "any", pattern: /\bdarwin\b/ },
   { category: "platform", language: "any", pattern: /\bwin32\b/ },
 ];
-
-function writeAtomic(directory: string, name: string, text: string): void {
-  const temporary = join(directory, `.${name}.${process.pid}.tmp`);
-  writeFileSync(temporary, text);
-  renameSync(temporary, join(directory, name));
-}
 
 function canonicalJson(value: Json): string {
   return `${encodeJson(value, 0)}\n`;
@@ -132,14 +127,14 @@ function installScriptsFrom(value: unknown): { hook: InstallHook; command: strin
 }
 
 function readPackageJson(path: string): Manifest {
-  const manifest = asRecord(parseJsonFile(path, "source/package.json"), "package.json");
+  const manifest = asRecord(parseJsonFile(path, "raw/source/package.json"), "package.json");
   const name = stringField(manifest, "name");
   if (name === null || name.length === 0) throw new Error("package.json has no name");
   return {
     name,
     version: stringField(manifest, "version"),
     ecosystem: "npm",
-    manifest_path: "source/package.json",
+    manifest_path: "raw/source/package.json",
     dependencies: dependenciesFrom(manifest.dependencies),
     install_scripts: installScriptsFrom(manifest.scripts),
   };
@@ -151,7 +146,7 @@ function parseTomlFile(path: string): unknown {
   } catch (error) {
     const line = error instanceof TomlError ? error.line : null;
     const detail = error instanceof Error ? error.message : "invalid toml";
-    throw new BoundaryError("source/pyproject.toml", line, detail);
+    throw new BoundaryError("raw/source/pyproject.toml", line, detail);
   }
 }
 
@@ -207,7 +202,7 @@ function readPyproject(path: string): Manifest {
     name,
     version: stringField(project, "version") ?? stringField(poetry, "version"),
     ecosystem: "pypi",
-    manifest_path: "source/pyproject.toml",
+    manifest_path: "raw/source/pyproject.toml",
     dependencies,
     install_scripts: [],
   };
@@ -219,7 +214,7 @@ function readManifest(sourceRoot: string): Manifest {
   const pyproject = join(sourceRoot, "pyproject.toml");
   if (existsSync(packageJson)) return readPackageJson(packageJson);
   if (existsSync(pyproject)) return readPyproject(pyproject);
-  throw new Error("source/ has no package.json or pyproject.toml");
+  throw new Error("raw/source/ has no package.json or pyproject.toml");
 }
 
 function idKey(id: string | number): string {
@@ -227,8 +222,8 @@ function idKey(id: string | number): string {
 }
 
 function advertisedTools(runDir: string): readonly ToolDefinition[] {
-  const source = "transcript.jsonl";
-  const timeline = parseTranscript(readFileSync(join(runDir, source), "utf8"), source);
+  const source = rawPath(runDir, "transcript.jsonl");
+  const timeline = parseTranscript(readFileSync(source, "utf8"), source);
   const listIds = new Set<string>();
   for (const entry of timeline) {
     if (entry.kind !== "message" || entry.rpc.kind !== "request" || entry.rpc.method !== "tools/list") continue;
@@ -251,6 +246,15 @@ function collectFiles(directory: string, files: string[]): void {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) collectFiles(path, files);
     else if (entry.isFile()) files.push(path);
+  }
+}
+
+export function pruneUnscanned(directory: string): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(directory, entry.name);
+    if (SKIP_DIRECTORIES.has(entry.name)) rmSync(path, { recursive: true, force: true });
+    else pruneUnscanned(path);
   }
 }
 
@@ -354,8 +358,8 @@ function scanSource(
 }
 
 export function profileSources(runDir: string): StaticProfile {
-  const sourceRoot = join(runDir, "source");
-  if (!existsSync(sourceRoot)) throw new Error("source/ is missing");
+  const sourceRoot = rawPath(runDir, "source");
+  if (!existsSync(sourceRoot)) throw new Error("raw/source/ is missing");
   const manifest = readManifest(sourceRoot);
   const tools = advertisedTools(runDir);
   const scanned = scanSource(sourceRoot, tools);
@@ -382,7 +386,5 @@ export function profileSources(runDir: string): StaticProfile {
     tool_sites: scanned.tool_sites,
     tool_texts: toolTexts,
   };
-  const text = canonicalJson(profile);
-  writeAtomic(runDir, "static_profile.json", text);
-  return parseStaticProfile(readFileSync(join(runDir, "static_profile.json"), "utf8"), "static_profile.json");
+  return parseStaticProfile(canonicalJson(profile), "static profile");
 }

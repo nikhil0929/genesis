@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseFindings, parseRun } from "../src/model.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const derived = ["events.jsonl", "processes.json", "bundles.json", "static_profile.json", "findings.json", "report.md"];
+const derived = ["bundles.json", "findings.json", "report.md"];
 
 function detonate(target: string): string {
   const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", target], {
@@ -43,21 +43,33 @@ function toolSection(reportText: string, tool: string): string {
 }
 
 const runDir = detonate("targets/detfix-allow.toml");
-assert.ok(existsSync(join(runDir, "host.json")), "host.json is missing");
+const topLevel = readdirSync(runDir).filter((name) => name !== "judgments.json").sort();
+assert.deepEqual(topLevel, ["bundles.json", "findings.json", "raw", "report.md"]);
+assert.deepEqual(readdirSync(join(runDir, "raw")).sort(), [
+  "canaries.json",
+  "host.json",
+  "proxy",
+  "source",
+  "stderr.log",
+  "target.toml",
+  "trace",
+  "transcript.jsonl",
+]);
+assert.equal(existsSync(join(runDir, "raw", "source", "node_modules")), false, "raw/source kept node_modules");
 const savedBundles = bytes(runDir, "bundles.json");
 const savedReport = bytes(runDir, "report.md");
-const savedHost = bytes(runDir, "host.json");
+const savedHost = bytes(runDir, join("raw", "host.json"));
 for (const name of derived) rmSync(join(runDir, name));
 
 report(runDir);
 assert.deepEqual(bytes(runDir, "bundles.json"), savedBundles, "bundles.json changed after report");
 assert.deepEqual(bytes(runDir, "report.md"), savedReport, "report.md changed after report");
-assert.deepEqual(bytes(runDir, "host.json"), savedHost, "host.json changed after report");
+assert.deepEqual(bytes(runDir, join("raw", "host.json")), savedHost, "host.json changed after report");
 
 report(runDir);
 assert.deepEqual(bytes(runDir, "bundles.json"), savedBundles, "bundles.json changed after the second report");
 assert.deepEqual(bytes(runDir, "report.md"), savedReport, "report.md changed after the second report");
-assert.deepEqual(bytes(runDir, "host.json"), savedHost, "host.json changed after the second report");
+assert.deepEqual(bytes(runDir, join("raw", "host.json")), savedHost, "host.json changed after the second report");
 
 const bundlesPath = join(runDir, "bundles.json");
 const findingsPath = join(runDir, "findings.json");

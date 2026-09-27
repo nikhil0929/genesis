@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseFindings, parseRun, parseStaticProfile } from "../src/model.js";
+import { parseFindings, parseRun } from "../src/model.js";
 import type { Event, Finding, Run, ToolCallBundle } from "../src/model.js";
 
 function detonate(target: string): string {
@@ -22,10 +22,8 @@ function detonate(target: string): string {
 function loadRun(runDir: string): { readonly run: Run; readonly findings: readonly Finding[] } {
   const bundlesPath = join(runDir, "bundles.json");
   const findingsPath = join(runDir, "findings.json");
-  const profilePath = join(runDir, "static_profile.json");
   const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);
   const findings = parseFindings(readFileSync(findingsPath, "utf8"), findingsPath, run);
-  parseStaticProfile(readFileSync(profilePath, "utf8"), profilePath);
   return { run, findings };
 }
 
@@ -173,4 +171,4 @@ assert.equal(block.run.network.kind, "block");
 for (const event of runEvents(block.run)) {
   if (event.body.kind === "net") assert.equal(event.body.proxy_flow_id, null, event.event_id);
 }
-assert.equal(existsSync(join(blockDir, "proxy", "flows.jsonl")), false);
+assert.equal(existsSync(join(blockDir, "raw", "proxy", "flows.jsonl")), false);

@@ -328,9 +328,9 @@ function sectionAfter(markdown: string, header: string): string {
 }
 
 function writeRun(dir: string): void {
-  mkdirSync(join(dir, "source"));
+  mkdirSync(join(dir, "raw", "source"), { recursive: true });
   writeFileSync(
-    join(dir, "source", "package.json"),
+    join(dir, "raw", "source", "package.json"),
     `${JSON.stringify({
       name: "detfix",
       version: "0.0.1",
@@ -339,7 +339,7 @@ function writeRun(dir: string): void {
     })}\n`,
   );
   writeFileSync(
-    join(dir, "source", "server.js"),
+    join(dir, "raw", "source", "server.js"),
     [
       'const child_process = require("child_process");',
       'fetch("https://example.invalid");',
@@ -369,7 +369,7 @@ function writeRun(dir: string): void {
     raw: listRaw,
     rpc: { kind: "result", id: 2 },
   };
-  writeFileSync(join(dir, "transcript.jsonl"), `${JSON.stringify(request)}\n${JSON.stringify(result)}\n`);
+  writeFileSync(join(dir, "raw", "transcript.jsonl"), `${JSON.stringify(request)}\n${JSON.stringify(result)}\n`);
   writeFileSync(join(dir, "bundles.json"), JSON.stringify(runDocument));
   writeFileSync(join(dir, "findings.json"), JSON.stringify(findingsDocument));
 }
@@ -379,7 +379,7 @@ function assertProfile(dir: string): void {
   assert.equal(profile.package.name, "detfix");
   assert.equal(profile.package.version, "0.0.1");
   assert.equal(profile.package.ecosystem, "npm");
-  assert.equal(profile.package.manifest_path, "source/package.json");
+  assert.equal(profile.package.manifest_path, "raw/source/package.json");
   assert.deepEqual(profile.dependencies, [{ name: "@modelcontextprotocol/sdk", spec: "1.30.1" }]);
   assert.deepEqual(profile.install_scripts, [{ hook: "postinstall", command: "node scripts/postinstall.js" }]);
 
@@ -409,11 +409,6 @@ function assertProfile(dir: string): void {
   const echoSites = profile.tool_sites.find((entry) => entry.tool === "echo");
   assert.equal(echoSites?.sites[0]?.file, "server.js");
   assert.equal(echoSites?.sites[0]?.line, 6);
-
-  const profileText = readFileSync(join(dir, "static_profile.json"), "utf8");
-  assert.equal(profileText.startsWith('{\n  "api_hints":'), true);
-  assert.equal(profileText.endsWith("}\n"), true);
-  assert.equal(profileText.endsWith("\n\n"), false);
 }
 
 function assertReport(report: string): void {
@@ -463,16 +458,13 @@ function assertReport(report: string): void {
 }
 
 function assertRebuild(dir: string, report: string): void {
-  const profilePath = join(dir, "static_profile.json");
   const reportPath = join(dir, "report.md");
-  const profileBytes = readFileSync(profilePath);
   const reportBytes = readFileSync(reportPath);
   const firstProfile = profileSources(dir);
   const secondProfile = profileSources(dir);
-  const secondReport = renderReport(dir);
+  const secondReport = renderReport(dir, secondProfile);
   assert.deepEqual(secondProfile, firstProfile);
   assert.equal(secondReport, report);
-  assert.deepEqual(readFileSync(profilePath), profileBytes);
   assert.deepEqual(readFileSync(reportPath), reportBytes);
   assert.equal(readFileSync(reportPath, "utf8"), secondReport);
 }
@@ -498,7 +490,7 @@ function assertInvalidJudgment(dir: string): void {
       },
     ])}\n`,
   );
-  const judged = renderReport(dir);
+  const judged = renderReport(dir, profileSources(dir));
   const invalidSection = sectionAfter(judged, "# Tool call 0: echo");
   const answerSection = sectionAfter(judged, "# Tool call 1: missing_tool");
   assert.match(invalidSection, /^invalid$/m);
@@ -514,7 +506,7 @@ function assertClockWarning(dir: string): void {
   const bundlesPath = join(dir, "bundles.json");
   const text = readFileSync(bundlesPath, "utf8").replace('"max_violation_us":100', '"max_violation_us":5001');
   writeFileSync(bundlesPath, text);
-  const warned = renderReport(dir);
+  const warned = renderReport(dir, profileSources(dir));
   assert.match(warned, /Clock check: failed/);
   assert.match(warned, /max_violation_us 5001 exceeds 5000/);
 }
@@ -522,9 +514,9 @@ function assertClockWarning(dir: string): void {
 function assertPyproject(): void {
   const dir = mkdtempSync(join(tmpdir(), "mcpdet-pyproject-"));
   try {
-    mkdirSync(join(dir, "source"));
+    mkdirSync(join(dir, "raw", "source"), { recursive: true });
     writeFileSync(
-      join(dir, "source", "pyproject.toml"),
+      join(dir, "raw", "source", "pyproject.toml"),
       [
         "[project]",
         'name = "mcp-server-git"',
@@ -536,11 +528,11 @@ function assertPyproject(): void {
         "",
       ].join("\n"),
     );
-    writeFileSync(join(dir, "transcript.jsonl"), `${JSON.stringify({ kind: "stdin_closed", t_us: 1 })}\n`);
+    writeFileSync(join(dir, "raw", "transcript.jsonl"), `${JSON.stringify({ kind: "stdin_closed", t_us: 1 })}\n`);
     const profile = profileSources(dir);
     assert.equal(profile.package.name, "mcp-server-git");
     assert.equal(profile.package.ecosystem, "pypi");
-    assert.equal(profile.package.manifest_path, "source/pyproject.toml");
+    assert.equal(profile.package.manifest_path, "raw/source/pyproject.toml");
     assert.deepEqual(profile.dependencies, [
       { name: "gitpython", spec: ">=3.1.40" },
       { name: "mcp", spec: "[cli]>=1.9.4" },
@@ -558,7 +550,7 @@ function main(): void {
   try {
     writeRun(dir);
     assertProfile(dir);
-    const report = renderReport(dir);
+    const report = renderReport(dir, profileSources(dir));
     assert.equal(readFileSync(join(dir, "report.md"), "utf8"), report);
     assertReport(report);
     assertRebuild(dir, report);
