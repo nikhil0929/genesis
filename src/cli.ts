@@ -2,11 +2,13 @@ import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { assertExactPlacement, parseRun, parseTarget, parseTranscript } from "./model.js";
+import { assertExactPlacement, parseFindings, parseRun, parseTarget, parseTranscript } from "./model.js";
 import type { Target } from "./model.js";
 import { attribute } from "./attribution.js";
+import { applyRules } from "./rules.js";
 import { traceTarget } from "./sandbox.js";
 import { readSensors } from "./sensors/index.js";
+import { profileSources } from "./static-profile.js";
 
 function withWorkingSource(target: Target, targetPath: string): Target {
   if (target.source.kind !== "local") return target;
@@ -23,7 +25,7 @@ export async function detonateCommand(targetPath: string): Promise<string> {
   const target = withWorkingSource(parseTarget(text, absolute), absolute);
   const traced = await traceTarget(target);
   copyFileSync(absolute, join(traced.runDir, "target.toml"));
-  const sensed = readSensors(traced.runDir);
+  const sensed = readSensors(traced.runDir, traced.envelope.network);
   const timeline = parseTranscript(readFileSync(traced.transcriptPath, "utf8"), traced.transcriptPath);
   const run = attribute({
     events: sensed.events,
@@ -34,6 +36,12 @@ export async function detonateCommand(targetPath: string): Promise<string> {
   writeFileSync(traced.bundlesPath, JSON.stringify(run));
   const parsed = parseRun(readFileSync(traced.bundlesPath, "utf8"), traced.bundlesPath);
   assertExactPlacement(sensed.events, parsed, traced.bundlesPath);
+  const profile = profileSources(traced.runDir);
+  const findings = applyRules(parsed, profile);
+  const findingsPath = join(traced.runDir, "findings.json");
+  const findingsText = JSON.stringify(findings);
+  writeFileSync(findingsPath, findingsText);
+  parseFindings(findingsText, findingsPath, parsed);
   return traced.runDir;
 }
 

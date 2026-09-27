@@ -1,8 +1,9 @@
+import { decode } from "dns-packet";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseEvents, parseProcesses } from "../model.js";
-import type { Event, SensorProcesses } from "../model.js";
+import { BoundaryError, CLOCK_TOLERANCE_US, parseEvents, parseProcesses } from "../model.js";
+import type { Event, ProxyFlow, RunNetwork, SensorProcesses } from "../model.js";
 
 export type SensorTrace = {
   readonly events: readonly Event[];
@@ -14,6 +15,29 @@ type ResultJson =
   | { readonly kind: "error"; readonly errno: string }
   | { readonly kind: "no_return" };
 
+type YySocket = {
+  readonly protocol: "TCP" | "UDP";
+  readonly local: { readonly address: string; readonly port: number };
+  readonly peer: { readonly address: string; readonly port: number };
+};
+
+type NetCapture = {
+  readonly yy: YySocket | null;
+  readonly payload: Buffer | null;
+  readonly fd: number | null;
+};
+
+type NetAnnotation =
+  | { readonly kind: "dns"; readonly name: string }
+  | { readonly kind: "flow"; readonly flowId: string }
+  | { readonly kind: "plain" };
+
+type Annotatable = {
+  readonly body: Record<string, unknown>;
+  readonly tUs: number;
+  readonly capture: NetCapture | null;
+};
+
 type RawCall = {
   readonly tUs: number;
   readonly tid: number;
@@ -22,7 +46,24 @@ type RawCall = {
   readonly syscall: string;
   readonly result: ResultJson;
   readonly body: Record<string, unknown>;
+  readonly capture: NetCapture | null;
 };
+
+const FLOW_JOIN_SLACK_US = 2_000_000;
+const YY_SOCKET = /(TCP|UDP):\[(\d{1,3}(?:\.\d{1,3}){3}):(\d+)->(\d{1,3}(?:\.\d{1,3}){3}):(\d+)\]/;
+const NET_SYSCALLS = new Set([
+  "socket",
+  "connect",
+  "bind",
+  "listen",
+  "accept",
+  "accept4",
+  "send",
+  "sendto",
+  "sendmsg",
+  "sendmmsg",
+]);
+const SEND_SYSCALLS = new Set(["send", "sendto", "sendmsg", "sendmmsg"]);
 
 const FILE_KIND: Readonly<Record<string, string>> = {
   unlink: "unlink",
@@ -478,6 +519,7 @@ function callFrom(text: string, tUs: number, tid: number, line: number, file: st
       syscall: "unparsed",
       result: { kind: "no_return" },
       body: other(text),
+      capture: null,
     };
   }
   const tail = parseTail(split.tail);
@@ -491,6 +533,7 @@ function callFrom(text: string, tUs: number, tid: number, line: number, file: st
     syscall: split.name,
     result: tail.result,
     body: bodyFor(split.name, split.args, tail.result, annotation),
+    capture: captureOf(split.name, split.args, annotation),
   };
 }
 
@@ -505,6 +548,7 @@ function marker(rest: string, tUs: number, tid: number, line: number, file: stri
       syscall: "exited",
       result: { kind: "no_return" },
       body: { kind: "process", action: { kind: "exit", end: { kind: "exited", status: Number(exited[1]) } } },
+      capture: null,
     };
   }
   const killed = /^\+\+\+ killed by ([A-Za-z0-9]+) \+\+\+$/.exec(rest);
@@ -517,6 +561,7 @@ function marker(rest: string, tUs: number, tid: number, line: number, file: stri
       syscall: "killed",
       result: { kind: "no_return" },
       body: { kind: "process", action: { kind: "exit", end: { kind: "killed", signal: killed[1] } } },
+      capture: null,
     };
   }
   const signal = /^--- ([A-Z0-9]+) /.exec(rest);
@@ -529,6 +574,7 @@ function marker(rest: string, tUs: number, tid: number, line: number, file: stri
       syscall: signal[1],
       result: { kind: "no_return" },
       body: other(rest),
+      capture: null,
     };
   }
   return {
@@ -539,7 +585,35 @@ function marker(rest: string, tUs: number, tid: number, line: number, file: stri
     syscall: "unparsed",
     result: { kind: "no_return" },
     body: other(rest),
+    capture: null,
   };
+}
+
+function observeSocket(text: string): { readonly fd: number; readonly yy: YySocket } | null {
+  const match = YY_SOCKET.exec(text);
+  if (match === null || match.index === undefined) return null;
+  const yy = parseYySocket(match[0]);
+  if (yy === null) return null;
+  const fd = /(\d+)<[^<]*$/.exec(text.slice(0, match.index))?.[1];
+  return fd === undefined ? null : { fd: Number(fd), yy };
+}
+
+// connect() returns before the tuple exists. The established socket shows up on the next syscall for that fd.
+function bindEstablishedSockets(
+  calls: readonly RawCall[],
+  seen: readonly { readonly line: number; readonly fd: number; readonly yy: YySocket }[],
+): RawCall[] {
+  return calls.map((call) => {
+    const capture = call.capture;
+    if (capture === null || capture.yy !== null || capture.fd === null) return call;
+    const reuse = calls.find(
+      (other) => other.line > call.line && other.syscall === "connect" && other.capture?.fd === capture.fd,
+    );
+    const limit = reuse?.line ?? Number.POSITIVE_INFINITY;
+    const found = seen.find((item) => item.fd === capture.fd && item.line >= call.line && item.line < limit);
+    if (found === undefined) return call;
+    return { ...call, capture: { yy: found.yy, payload: capture.payload, fd: capture.fd } };
+  });
 }
 
 // A blocking call is stamped when it starts. The resumed line only carries the return.
@@ -547,6 +621,7 @@ function parseFile(file: string, tid: number, text: string): RawCall[] {
   const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
   const calls: RawCall[] = [];
+  const seen: { line: number; fd: number; yy: YySocket }[] = [];
   let pending: { readonly tUs: number; readonly line: number; readonly name: string; readonly args: string } | null = null;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
@@ -556,6 +631,8 @@ function parseFile(file: string, tid: number, text: string): RawCall[] {
     const tUs = stampToUs(stamp[1], stamp[2]);
     const rest = stamp[3];
     const lineNo = index + 1;
+    const socket = observeSocket(rest);
+    if (socket !== null) seen.push({ line: lineNo, fd: socket.fd, yy: socket.yy });
     if (rest.includes("<unfinished ...>")) {
       const name = /^([A-Za-z0-9_]+)\(/.exec(rest);
       pending =
@@ -588,9 +665,10 @@ function parseFile(file: string, tid: number, text: string): RawCall[] {
       syscall: pending.name,
       result: { kind: "no_return" },
       body: other(null),
+      capture: null,
     });
   }
-  return calls;
+  return bindEstablishedSockets(calls, seen);
 }
 
 function resolvePid(tid: number, threadOwner: ReadonlyMap<number, number>): number {
@@ -745,9 +823,196 @@ function traceFiles(traceDir: string): { readonly file: string; readonly tid: nu
   return found;
 }
 
-export function readSensors(runDir: string): SensorTrace {
+function ipv4(text: string): boolean {
+  const parts = text.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+}
+
+function portOf(text: string): number | null {
+  if (!/^\d+$/.test(text)) return null;
+  const port = Number(text);
+  return port <= 65535 ? port : null;
+}
+
+function parseYySocket(annotation: string): YySocket | null {
+  const match = YY_SOCKET.exec(annotation);
+  if (
+    match?.[1] === undefined ||
+    match[2] === undefined ||
+    match[3] === undefined ||
+    match[4] === undefined ||
+    match[5] === undefined
+  ) {
+    return null;
+  }
+  if (match[1] !== "TCP" && match[1] !== "UDP") return null;
+  const localPort = portOf(match[3]);
+  const peerPort = portOf(match[5]);
+  if (!ipv4(match[2]) || !ipv4(match[4]) || localPort === null || peerPort === null) return null;
+  return {
+    protocol: match[1],
+    local: { address: match[2], port: localPort },
+    peer: { address: match[4], port: peerPort },
+  };
+}
+
+function captureOf(name: string, args: string, resultAnnotation: string | null): NetCapture | null {
+  if (!NET_SYSCALLS.has(name)) return null;
+  const fdText = /^(\d+)/.exec(args)?.[1];
+  // takeAnnotation stops at the '>' inside '->', so the socket is read from the raw text.
+  const yy = parseYySocket(args) ?? (resultAnnotation === null ? null : parseYySocket(resultAnnotation));
+  const quoted = SEND_SYSCALLS.has(name) ? quotedStrings(args)[0] : undefined;
+  return {
+    yy,
+    payload: quoted === undefined ? null : Buffer.from(quoted.text, "latin1"),
+    fd: fdText === undefined ? null : Number(fdText),
+  };
+}
+
+function questionName(payload: Buffer): string | null {
+  try {
+    const name = decode(payload).questions?.[0]?.name;
+    if (name === undefined || name.length === 0) return null;
+    return name;
+  } catch {
+    return null;
+  }
+}
+
+function resolverAddress(address: string, port: number): boolean {
+  return port === 53 && (address === "127.0.0.1" || address === "::1");
+}
+
+function ipPeer(value: unknown): { readonly address: string; readonly port: number } | null {
+  if (typeof value !== "object" || value === null) return null;
+  if (!("kind" in value) || value.kind !== "ip") return null;
+  if (!("address" in value) || typeof value.address !== "string") return null;
+  if (!("port" in value) || typeof value.port !== "number") return null;
+  return { address: value.address, port: value.port };
+}
+
+function dnsQuestion(event: Annotatable): string | null {
+  const capture = event.capture;
+  if (capture === null || event.body.kind !== "net" || event.body.op !== "send") return null;
+  if (capture.yy !== null) {
+    if (capture.yy.protocol !== "UDP" || !resolverAddress(capture.yy.peer.address, capture.yy.peer.port)) return null;
+  } else {
+    const peer = ipPeer(event.body.peer);
+    if (peer === null || event.body.protocol === "tcp" || !resolverAddress(peer.address, peer.port)) return null;
+  }
+  if (capture.payload === null) return null;
+  return questionName(capture.payload);
+}
+
+function applyAnnotation(body: Record<string, unknown>, note: NetAnnotation): void {
+  switch (note.kind) {
+    case "dns":
+      body.dns_name = note.name;
+      body.proxy_flow_id = null;
+      return;
+    case "flow":
+      body.proxy_flow_id = note.flowId;
+      body.dns_name = null;
+      return;
+    case "plain":
+      body.dns_name = null;
+      body.proxy_flow_id = null;
+      return;
+    default: {
+      const unreachable: never = note;
+      throw new Error(String(unreachable));
+    }
+  }
+}
+
+function opRank(op: unknown): number {
+  if (op === "connect") return 0;
+  if (op === "send") return 1;
+  return 2;
+}
+
+function claimFlows(events: readonly Annotatable[], notes: NetAnnotation[], flows: readonly ProxyFlow[]): void {
+  const claimed = new Set<number>();
+  const ordered = [...flows].sort((left, right) => left.start_us - right.start_us);
+  for (const flow of ordered) {
+    let best: { readonly index: number; readonly distance: number; readonly tUs: number; readonly rank: number } | null = null;
+    for (let index = 0; index < events.length; index += 1) {
+      if (claimed.has(index) || notes[index]?.kind === "dns") continue;
+      const event = events[index];
+      const yy = event?.capture?.yy;
+      if (event === undefined || yy == null) continue;
+      if (yy.protocol !== "TCP" || yy.peer.port !== 8080) continue;
+      if (yy.local.address !== flow.client.address || yy.local.port !== flow.client.port) continue;
+      if (event.tUs < flow.start_us - FLOW_JOIN_SLACK_US || event.tUs > flow.start_us + CLOCK_TOLERANCE_US) continue;
+      const candidate = {
+        index,
+        distance: Math.abs(event.tUs - flow.start_us),
+        tUs: event.tUs,
+        rank: opRank(event.body.op),
+      };
+      if (
+        best === null ||
+        candidate.distance < best.distance ||
+        (candidate.distance === best.distance && candidate.tUs < best.tUs) ||
+        (candidate.distance === best.distance && candidate.tUs === best.tUs && candidate.rank < best.rank)
+      ) {
+        best = candidate;
+      }
+    }
+    if (best !== null) {
+      claimed.add(best.index);
+      notes[best.index] = { kind: "flow", flowId: flow.flow_id };
+    }
+  }
+}
+
+function annotateNet(events: Annotatable[], network: RunNetwork): void {
+  const notes: NetAnnotation[] = events.map(() => ({ kind: "plain" }));
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (event === undefined) continue;
+    const yy = event.capture?.yy;
+    if (yy != null && event.body.kind === "net") {
+      event.body.local = { kind: "ip", address: yy.local.address, port: yy.local.port };
+    }
+    const name = dnsQuestion(event);
+    if (name !== null) notes[index] = { kind: "dns", name };
+  }
+  switch (network.kind) {
+    case "block":
+      break;
+    case "allow":
+      claimFlows(events, notes, network.flows);
+      break;
+    default: {
+      const unreachable: never = network;
+      throw new Error(String(unreachable));
+    }
+  }
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    const note = notes[index];
+    if (event === undefined || note === undefined || event.body.kind !== "net") continue;
+    applyAnnotation(event.body, note);
+  }
+  const seen = new Set<string>();
+  for (const event of events) {
+    const flowId = event.body.proxy_flow_id;
+    if (typeof flowId !== "string") continue;
+    if (seen.has(flowId)) throw new BoundaryError("events.jsonl", null, `proxy flow ${flowId} is claimed twice`);
+    seen.add(flowId);
+  }
+}
+
+export function readSensors(runDir: string, network: RunNetwork): SensorTrace {
   const calls = traceFiles(join(runDir, "trace")).flatMap((file) => parseFile(file.file, file.tid, file.text));
-  const built = buildTrace(calls);
+  const sorted = [...calls].sort((left, right) => left.tUs - right.tUs || left.tid - right.tid || left.line - right.line);
+  annotateNet(
+    sorted.map((call) => ({ body: call.body, tUs: call.tUs, capture: call.capture })),
+    network,
+  );
+  const built = buildTrace(sorted);
   const eventsPath = join(runDir, "events.jsonl");
   const processesPath = join(runDir, "processes.json");
   const events = parseEvents(
