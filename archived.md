@@ -1,0 +1,4 @@
+- [x] [Technical design](/cursor/stores/bc-ddd00a24-3754-4cee-ae7c-b90d3917c196/docs/technical-design.md) mcpdet is TypeScript on Node 24
+- [x] [CTO README](https://github.com/nikhil0929/genesis) first writeup is on GitHub main
+- [x] [Existing detonators](/cursor/stores/bc-ddd00a24-3754-4cee-ae7c-b90d3917c196/docs/existing-detonators.md) ready to read
+- [x] [Challenge explainer](/cursor/stores/bc-ddd00a24-3754-4cee-ae7c-b90d3917c196/docs/local-mcp-detonation-challenge.md) ready to read
