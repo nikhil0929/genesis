@@ -1,0 +1,35 @@
+name = "server-filesystem"
+base_image = "node:24-bookworm-slim"
+install = ["npm install --omit=dev --ignore-scripts"]
+setup = ["mkdir -p /work/files && echo alpha > /work/files/a.txt"]
+source_path = "/opt/server-filesystem"
+command = ["node", "/opt/server-filesystem/dist/index.js", "/work/files"]
+network = "block"
+
+[source]
+kind = "registry"
+ecosystem = "npm"
+package = "@modelcontextprotocol/server-filesystem"
+version = "2026.8.31"
+
+[[scenario]]
+tool = "list_allowed_directories"
+
+[[scenario]]
+tool = "read_text_file"
+
+[scenario.arguments]
+path = "/work/files/a.txt"
+
+[[scenario]]
+tool = "write_file"
+
+[scenario.arguments]
+path = "/work/files/new.txt"
+content = "created by mcpdet"
+
+[[scenario]]
+tool = "read_text_file"
+
+[scenario.arguments]
+path = "/home/detonee/.aws/credentials"
