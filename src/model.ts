@@ -4,7 +4,7 @@
 // so the document cannot store a second copy that disagrees. Parse functions are
 // the boundary. Schemas stay in this file.
 
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, TomlError } from "smol-toml";
 import { z } from "zod";
 
 // --- Boundary ---------------------------------------------------------------
@@ -153,7 +153,8 @@ export const SHUTDOWN_WAIT_MS = 5_000;
 
 const pinnedVersionSchema = z
   .string()
-  .regex(/^[0-9A-Za-z][0-9A-Za-z.+_-]*$/, "must be an exact version, not a range");
+  .regex(/^[0-9A-Za-z][0-9A-Za-z.+_-]*$/, "must be an exact version, not a range")
+  .refine((version) => /\d/.test(version), "must be an exact version, not a range");
 
 const ecosystemSchema = z.enum(["pypi", "npm"]);
 export type Ecosystem = Out<typeof ecosystemSchema>;
@@ -204,7 +205,8 @@ export function parseTarget(text: string, source: string): Target {
     value = parseToml(text);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new BoundaryError(source, null, detail);
+    const line = error instanceof TomlError ? error.line : null;
+    throw new BoundaryError(source, line, detail);
   }
   return parseWith(targetSchema, value, source, null);
 }
@@ -849,8 +851,11 @@ const wellFormed = { when: (payload: { readonly issues: readonly unknown[] }) =>
 
 function keyedProcesses<T extends z.ZodType<{ readonly pid: number; readonly kind: string }>>(record: T) {
   return z.record(pidKeySchema, record).superRefine((table, ctx) => {
+    const nodes = new Map(
+      Object.entries<{ readonly pid: number; readonly kind: string; readonly parent_pid?: number }>(table),
+    );
     let roots = 0;
-    for (const [key, process] of Object.entries<{ readonly pid: number; readonly kind: string }>(table)) {
+    for (const [key, process] of nodes) {
       if (key !== String(process.pid)) {
         ctx.addIssue({ code: "custom", message: `process key ${key} does not match pid ${String(process.pid)}` });
       }
@@ -858,6 +863,26 @@ function keyedProcesses<T extends z.ZodType<{ readonly pid: number; readonly kin
     }
     if (roots !== 1) {
       ctx.addIssue({ code: "custom", message: "expected exactly one root process" });
+    }
+    for (const process of nodes.values()) {
+      if (process.kind !== "child") continue;
+      if (!nodes.has(String(process.parent_pid))) {
+        ctx.addIssue({
+          code: "custom",
+          message: `process ${String(process.pid)} names parent ${String(process.parent_pid)}, which is not in the table`,
+        });
+        continue;
+      }
+      const seen = new Set<number>();
+      let current = nodes.get(String(process.pid));
+      while (current?.kind === "child") {
+        if (seen.has(current.pid)) {
+          ctx.addIssue({ code: "custom", message: `process ${String(process.pid)} is in a parent cycle` });
+          break;
+        }
+        seen.add(current.pid);
+        current = nodes.get(String(current.parent_pid));
+      }
     }
   }, wellFormed);
 }
@@ -981,12 +1006,6 @@ export type RpcErrorOutcome = Out<typeof rpcErrorOutcomeSchema>;
 export type NoReplyOutcome = Out<typeof noReplyOutcomeSchema>;
 export type CallOutcome = Out<typeof callOutcomeSchema>;
 
-const ownedProcessSchema = z.strictObject({
-  pid: pidSchema,
-  end: processEndSchema,
-});
-export type OwnedProcess = Out<typeof ownedProcessSchema>;
-
 const toolCallBundleSchema = z.strictObject({
   kind: z.literal("tool_call"),
   call_id: callIdSchema,
@@ -997,7 +1016,6 @@ const toolCallBundleSchema = z.strictObject({
   sent_us: microsSchema,
   outcome: callOutcomeSchema,
   events: z.array(toolCallEntrySchema),
-  owned_processes: z.array(ownedProcessSchema),
 });
 export type ToolCallBundle = Out<typeof toolCallBundleSchema>;
 
@@ -1017,7 +1035,6 @@ const shutdownBundleSchema = z.strictObject({
   trigger: shutdownTriggerSchema,
   duration_us: durationSchema,
   events: z.array(shutdownEntrySchema),
-  killed_at_teardown: z.array(pidSchema),
 });
 export type ShutdownBundle = Out<typeof shutdownBundleSchema>;
 export type Bundle = StartupBundle | ToolCallBundle | ShutdownBundle;
@@ -1045,15 +1062,15 @@ export function afterReply(call: ToolCallBundle, entry: ToolCallEntry): boolean 
 }
 
 /** Still running when the outcome time arrived. Derived from the end record and the outcome time. */
-export function outlivedReply(call: ToolCallBundle, owned: OwnedProcess): boolean {
-  switch (owned.end.kind) {
+export function outlivedReply(call: ToolCallBundle, process: AttributedChildProcess | ProcessRecord): boolean {
+  switch (process.end.kind) {
     case "alive_at_teardown":
       return true;
     case "exited":
     case "killed":
-      return owned.end.t_us > outcomeTime(call);
+      return process.end.t_us > outcomeTime(call);
     default: {
-      const _exhaustive: never = owned.end;
+      const _exhaustive: never = process.end;
       return _exhaustive;
     }
   }
@@ -1101,7 +1118,7 @@ const allowNetworkSchema = z.strictObject({ kind: z.literal("allow"), flows: z.a
 const blockNetworkSchema = z.strictObject({ kind: z.literal("block") });
 const runNetworkSchema = z.discriminatedUnion("kind", [allowNetworkSchema, blockNetworkSchema]);
 
-// Whether the check passed is clockPassed. The boolean is max_violation_us <= 5ms.
+// Whether the check passed is clockPassed. It passes when at least one response was checked and the largest gap is within 5ms.
 const clockCheckSchema = z.strictObject({
   max_violation_us: durationSchema,
   responses_checked: z.int().nonnegative(),
@@ -1114,7 +1131,24 @@ export type RunNetwork = Out<typeof runNetworkSchema>;
 export type ClockCheck = Out<typeof clockCheckSchema>;
 
 export function clockPassed(check: ClockCheck): boolean {
-  return check.max_violation_us <= CLOCK_TOLERANCE_US;
+  return check.responses_checked > 0 && check.max_violation_us <= CLOCK_TOLERANCE_US;
+}
+
+function actingUnderAncestor(processes: AttributedProcesses, event: Event, ancestorPid: number): boolean {
+  if (
+    event.body.kind === "process" &&
+    event.body.action.kind === "spawn" &&
+    event.body.action.child_pid === ancestorPid
+  ) {
+    return true;
+  }
+  let pid: number = event.pid;
+  while (pid !== ancestorPid) {
+    const process = processes[String(pid)];
+    if (process?.kind !== "child") return false;
+    pid = process.parent_pid;
+  }
+  return true;
 }
 
 const runSchema = z
@@ -1145,34 +1179,110 @@ const runSchema = z
       const process = run.processes[String(pid)];
       return process?.kind === "child" ? process.owner : null;
     };
+    for (const process of Object.values(run.processes)) {
+      if (process.kind !== "child" || process.owner.kind !== "call" || seenCalls.has(process.owner.call_id)) continue;
+      ctx.addIssue({
+        code: "custom",
+        message: `process ${String(process.pid)} is owned by call ${String(process.owner.call_id)}, which is not in the run`,
+      });
+    }
     for (const call of run.tool_calls) {
+      switch (call.definition.kind) {
+        case "advertised": {
+          const defined = call.definition.tool;
+          if (defined.name !== call.tool) {
+            ctx.addIssue({
+              code: "custom",
+              message: `call ${String(call.call_id)} names tool ${call.tool} but its definition is ${defined.name}`,
+            });
+          } else if (
+            !run.startup.advertised_tools.some(
+              (tool) => tool.name === call.tool && JSON.stringify(tool) === JSON.stringify(defined),
+            )
+          ) {
+            ctx.addIssue({
+              code: "custom",
+              message: `call ${String(call.call_id)} carries a definition that startup did not advertise`,
+            });
+          }
+          break;
+        }
+        case "not_advertised":
+          if (run.startup.advertised_tools.some((tool) => tool.name === call.tool)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `call ${String(call.call_id)} is not_advertised but startup advertised ${call.tool}`,
+            });
+          }
+          break;
+        default: {
+          const _exhaustive: never = call.definition;
+          void _exhaustive;
+        }
+      }
       const startedByCall = (pid: number): boolean => {
         const owner = childOwner(pid);
         return owner?.kind === "call" && owner.call_id === call.call_id;
       };
       for (const entry of call.events) {
-        if (entry.link.kind === "overlap") {
-          if (outside(entry.event.t_us, call.sent_us, call.outcome.duration_us)) {
-            ctx.addIssue({
-              code: "custom",
-              message: `event ${entry.event.event_id} is overlap but falls outside the call window`,
-            });
+        switch (entry.link.kind) {
+          case "overlap":
+            if (outside(entry.event.t_us, call.sent_us, call.outcome.duration_us)) {
+              ctx.addIssue({
+                code: "custom",
+                message: `event ${entry.event.event_id} is overlap but falls outside the call window`,
+              });
+            }
+            break;
+          case "owned":
+            if (!startedByCall(entry.link.ancestor_pid)) {
+              ctx.addIssue({
+                code: "custom",
+                message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which call ${String(call.call_id)} did not start`,
+              });
+            } else if (!actingUnderAncestor(run.processes, entry.event, entry.link.ancestor_pid)) {
+              ctx.addIssue({
+                code: "custom",
+                message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)} but pid ${String(entry.event.pid)} does not descend from it`,
+              });
+            }
+            break;
+          default: {
+            const _exhaustive: never = entry.link;
+            void _exhaustive;
           }
-        } else if (!startedByCall(entry.link.ancestor_pid)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which call ${String(call.call_id)} did not start`,
-          });
         }
       }
-      for (const owned of call.owned_processes) {
-        if (!startedByCall(owned.pid)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `owned process ${String(owned.pid)} was not started by call ${String(call.call_id)}`,
-          });
-        }
+    }
+    const startupEnded = windowEnd(run.startup.window);
+    const firstCall = run.tool_calls[0];
+    if (firstCall !== undefined && firstCall.sent_us < startupEnded) {
+      ctx.addIssue({
+        code: "custom",
+        message: `call ${String(firstCall.call_id)} starts before startup ends`,
+      });
+    }
+    for (let index = 1; index < run.tool_calls.length; index += 1) {
+      const previous = run.tool_calls[index - 1];
+      const current = run.tool_calls[index];
+      if (previous === undefined || current === undefined) continue;
+      if (current.sent_us < outcomeTime(previous)) {
+        ctx.addIssue({
+          code: "custom",
+          message: `call ${String(current.call_id)} is sent before call ${String(previous.call_id)} finished`,
+        });
       }
+    }
+    const lastCall = run.tool_calls.at(-1);
+    const finishedAt = lastCall === undefined ? startupEnded : outcomeTime(lastCall);
+    if (run.shutdown.trigger.t_us < finishedAt) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          lastCall === undefined
+            ? "shutdown starts before startup ends"
+            : `shutdown starts before call ${String(lastCall.call_id)} finished`,
+      });
     }
     for (const entry of run.startup.events) {
       if (outside(entry.event.t_us, run.startup.window.start_us, run.startup.window.duration_us)) {
@@ -1183,22 +1293,53 @@ const runSchema = z
       }
     }
     for (const entry of run.shutdown.events) {
-      if (entry.link.kind === "phase") {
-        if (outside(entry.event.t_us, run.shutdown.trigger.t_us, run.shutdown.duration_us)) {
-          ctx.addIssue({
-            code: "custom",
-            message: `event ${entry.event.event_id} is phase but falls outside the shutdown window`,
-          });
+      switch (entry.link.kind) {
+        case "phase":
+          if (outside(entry.event.t_us, run.shutdown.trigger.t_us, run.shutdown.duration_us)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `event ${entry.event.event_id} is phase but falls outside the shutdown window`,
+            });
+          }
+          break;
+        case "owned":
+          if (childOwner(entry.link.ancestor_pid)?.kind !== "shutdown") {
+            ctx.addIssue({
+              code: "custom",
+              message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which shutdown did not start`,
+            });
+          } else if (!actingUnderAncestor(run.processes, entry.event, entry.link.ancestor_pid)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)} but pid ${String(entry.event.pid)} does not descend from it`,
+            });
+          }
+          break;
+        default: {
+          const _exhaustive: never = entry.link;
+          void _exhaustive;
         }
-      } else if (childOwner(entry.link.ancestor_pid)?.kind !== "shutdown") {
-        ctx.addIssue({
-          code: "custom",
-          message: `event ${entry.event.event_id} is owned by pid ${String(entry.link.ancestor_pid)}, which shutdown did not start`,
-        });
+      }
+    }
+    const loggedFlows = new Set<string>();
+    switch (run.network.kind) {
+      case "allow":
+        for (const flow of run.network.flows) {
+          if (loggedFlows.has(flow.flow_id)) {
+            ctx.addIssue({ code: "custom", message: `flow id ${flow.flow_id} appears twice` });
+          }
+          loggedFlows.add(flow.flow_id);
+        }
+        break;
+      case "block":
+        break;
+      default: {
+        const _exhaustive: never = run.network;
+        void _exhaustive;
       }
     }
     const seenEvents = new Set<string>();
-    const visit = (event: { event_id: string; pid: number }): void => {
+    const visit = (event: Event): void => {
       if (seenEvents.has(event.event_id)) {
         ctx.addIssue({ code: "custom", message: `event ${event.event_id} is in two bundles` });
       }
@@ -1208,6 +1349,28 @@ const runSchema = z
           code: "custom",
           message: `event ${event.event_id} names pid ${String(event.pid)} which has no process`,
         });
+      }
+      if (event.body.kind !== "net" || event.body.proxy_flow_id === null) return;
+      const flowId = event.body.proxy_flow_id;
+      switch (run.network.kind) {
+        case "block":
+          ctx.addIssue({
+            code: "custom",
+            message: `event ${event.event_id} names proxy flow ${flowId} in a block run`,
+          });
+          break;
+        case "allow":
+          if (!loggedFlows.has(flowId)) {
+            ctx.addIssue({
+              code: "custom",
+              message: `event ${event.event_id} names proxy flow ${flowId}, which the proxy did not log`,
+            });
+          }
+          break;
+        default: {
+          const _exhaustive: never = run.network;
+          void _exhaustive;
+        }
       }
     };
     for (const entry of run.startup.events) visit(entry.event);
@@ -1220,6 +1383,26 @@ const runSchema = z
 
 export type Run = Out<typeof runSchema>;
 
+export function ownedProcesses(run: Run, call: ToolCallBundle): readonly AttributedChildProcess[] {
+  const matches: AttributedChildProcess[] = [];
+  for (const process of Object.values(run.processes)) {
+    if (process.kind === "child" && process.owner.kind === "call" && process.owner.call_id === call.call_id) {
+      matches.push(process);
+    }
+  }
+  matches.sort((left, right) => left.pid - right.pid);
+  return matches;
+}
+
+export function killedAtTeardown(run: Run): readonly Pid[] {
+  const pids: Pid[] = [];
+  for (const process of Object.values(run.processes)) {
+    if (process.end.kind === "alive_at_teardown") pids.push(process.pid);
+  }
+  pids.sort((left, right) => left - right);
+  return pids;
+}
+
 /** Send-order position. It is the index in `run.tool_calls`, so a stored seq cannot disagree with it. */
 export function toolCallSeq(run: Run, callId: CallId): number | null {
   const index = run.tool_calls.findIndex((call) => call.call_id === callId);
@@ -1231,12 +1414,12 @@ export function parseRun(text: string, source: string): Run {
 }
 
 export function assertExactPlacement(events: readonly Event[], run: Run, source: string): number {
-  const placed = new Set<string>();
+  const placed = new Map<string, Event>();
   const visit = (event: Event): void => {
     if (placed.has(event.event_id)) {
       throw new BoundaryError(source, null, `event ${event.event_id} is in two bundles`);
     }
-    placed.add(event.event_id);
+    placed.set(event.event_id, event);
   };
   for (const entry of run.startup.events) visit(entry.event);
   for (const call of run.tool_calls) {
@@ -1245,19 +1428,23 @@ export function assertExactPlacement(events: readonly Event[], run: Run, source:
   for (const entry of run.shutdown.events) visit(entry.event);
   for (const entry of run.unmatched) visit(entry.event);
 
-  const traced = new Set<string>();
+  const traced = new Map<string, Event>();
   for (const event of events) {
     if (traced.has(event.event_id)) {
       throw new BoundaryError(source, null, `event ${event.event_id} appears twice in the trace`);
     }
-    traced.add(event.event_id);
+    traced.set(event.event_id, event);
     if (!placed.has(event.event_id)) {
       throw new BoundaryError(source, null, `event ${event.event_id} is in none of the bundles`);
     }
   }
-  for (const id of placed) {
-    if (!traced.has(id)) {
+  for (const [id, placedEvent] of placed) {
+    const tracedEvent = traced.get(id);
+    if (tracedEvent === undefined) {
       throw new BoundaryError(source, null, `event ${id} is not in the trace`);
+    }
+    if (JSON.stringify(placedEvent) !== JSON.stringify(tracedEvent)) {
+      throw new BoundaryError(source, null, `event ${id} in the bundles differs from the trace`);
     }
   }
   return placed.size;
