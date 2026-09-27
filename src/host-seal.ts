@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 
 import { BoundaryError, parseCanaries, parseFlows, parseTarget } from "./model.js";
+import type { Target, TargetSource } from "./model.js";
 import type { RunEnvelope } from "./sandbox.js";
 
 const hostSealSchema = z.strictObject({
@@ -14,6 +15,41 @@ export type HostSeal = {
   readonly image_id: string;
   readonly source_path: string;
 };
+
+export function sealSourcePath(source: TargetSource): string {
+  switch (source.kind) {
+    case "local":
+      return source.path;
+    case "registry":
+      return ["registry", source.ecosystem, source.package, source.version].join("/");
+    default: {
+      const unreachable: never = source;
+      throw new Error(String(unreachable));
+    }
+  }
+}
+
+function envelopeSource(target: Target, seal: HostSeal): TargetSource {
+  switch (target.source.kind) {
+    case "local":
+      return {
+        kind: "local",
+        ecosystem: target.source.ecosystem,
+        path: seal.source_path,
+      };
+    case "registry": {
+      const expected = sealSourcePath(target.source);
+      if (seal.source_path !== expected) {
+        throw new Error(`host seal source_path ${seal.source_path} does not match ${expected}`);
+      }
+      return target.source;
+    }
+    default: {
+      const unreachable: never = target.source;
+      throw new Error(String(unreachable));
+    }
+  }
+}
 
 export function writeHostSeal(runDir: string, seal: HostSeal): void {
   const text = JSON.stringify({ image_id: seal.image_id, source_path: seal.source_path });
@@ -42,7 +78,7 @@ export function readEnvelope(runDir: string): RunEnvelope {
   const seal = readHostSeal(directory);
   const targetPath = join(directory, "target.toml");
   const target = parseTarget(readFileSync(targetPath, "utf8"), targetPath);
-  if (target.source.kind !== "local") throw new Error(`registry source is not supported for ${target.name}`);
+  const source = envelopeSource(target, seal);
   const canariesPath = join(directory, "canaries.json");
   let network: RunEnvelope["network"];
   switch (target.network) {
@@ -63,11 +99,7 @@ export function readEnvelope(runDir: string): RunEnvelope {
     runId: basename(directory),
     target: {
       name: target.name,
-      source: {
-        kind: target.source.kind,
-        ecosystem: target.source.ecosystem,
-        path: seal.source_path,
-      },
+      source,
       image_id: seal.image_id,
       command: target.command,
     },

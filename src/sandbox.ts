@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -17,6 +17,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 import {
   CALL_TIMEOUT_MS,
@@ -28,8 +29,8 @@ import {
   parseFlows,
   parsePlan,
 } from "./model.js";
-import type { Canary, ProxyFlow, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
-import { writeHostSeal } from "./host-seal.js";
+import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
+import { sealSourcePath, writeHostSeal } from "./host-seal.js";
 
 export type RunEnvelope = {
   readonly runId: string;
@@ -277,11 +278,298 @@ function serverEnv(target: Target, canaries: readonly Canary[], proxy: AllowProx
   return env;
 }
 
+type ArchiveDigest =
+  | { readonly algorithm: "sha256"; readonly hex: string }
+  | { readonly algorithm: "sha512"; readonly base64: string };
+
+type Archive = {
+  readonly bytes: Buffer;
+  readonly digest: ArchiveDigest;
+};
+
+type ArchiveEntry = {
+  readonly name: string;
+  readonly link: string | null;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readCString(buffer: Buffer, start: number, length: number): string {
+  const slice = buffer.subarray(start, start + length);
+  const zero = slice.indexOf(0);
+  return slice.subarray(0, zero === -1 ? slice.length : zero).toString("utf8");
+}
+
+function parseOctal(buffer: Buffer, start: number, length: number): number {
+  const text = readCString(buffer, start, length).trim();
+  if (text.length === 0) return 0;
+  const value = Number.parseInt(text, 8);
+  if (!Number.isSafeInteger(value)) throw new Error("tar octal field is out of range");
+  return value;
+}
+
+function isZeroBlock(header: Buffer): boolean {
+  for (const byte of header) {
+    if (byte !== 0) return false;
+  }
+  return true;
+}
+
+function assertChecksum(header: Buffer): void {
+  let sum = 0;
+  for (let index = 0; index < 512; index += 1) {
+    const byte = header[index] ?? 0;
+    sum += index >= 148 && index < 156 ? 0x20 : byte;
+  }
+  const stored = parseOctal(header, 148, 8);
+  if (sum !== stored) throw new Error(`tar checksum mismatch: ${String(sum)} !== ${String(stored)}`);
+}
+
+function readTarSize(header: Buffer): number {
+  const first = header[124] ?? 0;
+  if ((first & 0x80) === 0) return parseOctal(header, 124, 12);
+  let value = first & 0x7f;
+  for (let index = 125; index < 136; index += 1) value = value * 256 + (header[index] ?? 0);
+  if (!Number.isSafeInteger(value)) throw new Error("tar entry is too large");
+  return value;
+}
+
+function headerPath(header: Buffer): string {
+  const name = readCString(header, 0, 100);
+  const magic = header.subarray(257, 262).toString("utf8");
+  const prefix = magic === "ustar" ? readCString(header, 345, 155) : "";
+  return prefix.length === 0 ? name : `${prefix}/${name}`;
+}
+
+function parsePax(body: Buffer): ReadonlyMap<string, string> {
+  const records = new Map<string, string>();
+  let offset = 0;
+  while (offset < body.length) {
+    if (body[offset] === 0) break;
+    const space = body.indexOf(0x20, offset);
+    if (space === -1) throw new Error("pax header is missing a length");
+    const length = Number(body.subarray(offset, space).toString("utf8"));
+    if (!Number.isInteger(length) || length <= 0 || offset + length > body.length) {
+      throw new Error("pax header length is invalid");
+    }
+    const record = body.subarray(offset, offset + length);
+    const equals = record.indexOf(0x3d);
+    if (equals === -1 || record[record.length - 1] !== 0x0a) throw new Error("pax record is malformed");
+    const key = record.subarray(space - offset + 1, equals).toString("utf8");
+    const value = record.subarray(equals + 1, record.length - 1).toString("utf8");
+    records.set(key, value);
+    offset += length;
+  }
+  return records;
+}
+
+function listArchiveEntries(bytes: Buffer): readonly ArchiveEntry[] {
+  const raw = gunzipSync(bytes);
+  const entries: ArchiveEntry[] = [];
+  let offset = 0;
+  let pendingName: string | null = null;
+  let pendingLink: string | null = null;
+  while (offset + 512 <= raw.length) {
+    const header = raw.subarray(offset, offset + 512);
+    offset += 512;
+    if (isZeroBlock(header)) break;
+    assertChecksum(header);
+    const size = readTarSize(header);
+    const dataEnd = offset + size;
+    const padded = offset + Math.ceil(size / 512) * 512;
+    if (padded > raw.length) throw new Error("tar entry extends past the archive");
+    const body = raw.subarray(offset, dataEnd);
+    offset = padded;
+    const typeByte = header[156] ?? 0;
+    const type = typeByte === 0 ? "0" : String.fromCharCode(typeByte);
+    if (type === "g") continue;
+    if (type === "x") {
+      const records = parsePax(body);
+      pendingName = records.get("path") ?? pendingName;
+      pendingLink = records.get("linkpath") ?? pendingLink;
+      continue;
+    }
+    if (type === "L") {
+      pendingName = body.toString("utf8").replace(/\0+$/, "");
+      continue;
+    }
+    if (type === "K") {
+      pendingLink = body.toString("utf8").replace(/\0+$/, "");
+      continue;
+    }
+    const name = pendingName ?? headerPath(header);
+    const link = type === "1" || type === "2" ? (pendingLink ?? readCString(header, 157, 100)) : null;
+    pendingName = null;
+    pendingLink = null;
+    entries.push({ name, link });
+  }
+  return entries;
+}
+
+function entryEscapes(name: string): boolean {
+  if (name.length === 0 || name.includes("\0") || name.includes("\n")) return true;
+  if (name.startsWith("/") || name.startsWith("\\") || /^[A-Za-z]:/.test(name)) return true;
+  return name.split(/[/\\]/).some((part) => part === "..");
+}
+
+function refuseArchiveEntries(entries: readonly ArchiveEntry[]): void {
+  for (const entry of entries) {
+    if (entryEscapes(entry.name) || (entry.link !== null && entryEscapes(entry.link))) {
+      throw new Error(`archive entry escapes the destination: ${entry.name}`);
+    }
+  }
+}
+
+async function download(url: string): Promise<Buffer> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`GET ${url} returned ${String(response.status)}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
+async function fetchJson(url: string): Promise<unknown> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`GET ${url} returned ${String(response.status)}`);
+  const body: unknown = await response.json();
+  return body;
+}
+
+function pypiSdist(document: unknown, pkg: string, version: string): { url: string; sha256: string } {
+  if (!isRecord(document) || !Array.isArray(document.urls)) {
+    throw new Error(`pypi ${pkg} ${version} has no urls`);
+  }
+  const sdists: { url: string; sha256: string }[] = [];
+  for (const entry of document.urls) {
+    if (!isRecord(entry) || entry.packagetype !== "sdist") continue;
+    if (typeof entry.url !== "string" || !isRecord(entry.digests) || typeof entry.digests.sha256 !== "string") {
+      throw new Error(`pypi ${pkg} ${version} sdist is missing a url or sha256`);
+    }
+    sdists.push({ url: entry.url, sha256: entry.digests.sha256 });
+  }
+  const only = sdists.length === 1 ? sdists[0] : undefined;
+  if (only === undefined) throw new Error(`pypi ${pkg} ${version} has ${String(sdists.length)} sdists`);
+  return only;
+}
+
+function npmDist(document: unknown, pkg: string, version: string): { url: string; integrity: string } {
+  if (!isRecord(document) || !isRecord(document.dist)) throw new Error(`npm ${pkg} ${version} has no dist`);
+  const tarball = document.dist.tarball;
+  const integrity = document.dist.integrity;
+  if (typeof tarball !== "string" || typeof integrity !== "string") {
+    throw new Error(`npm ${pkg} ${version} dist is missing tarball or integrity`);
+  }
+  return { url: tarball, integrity };
+}
+
+function requireDigest(bytes: Buffer, digest: ArchiveDigest): void {
+  switch (digest.algorithm) {
+    case "sha256": {
+      const actual = createHash("sha256").update(bytes).digest("hex");
+      if (actual !== digest.hex) throw new Error(`sha256 mismatch: expected ${digest.hex}, got ${actual}`);
+      return;
+    }
+    case "sha512": {
+      const actual = createHash("sha512").update(bytes).digest();
+      const expected = Buffer.from(digest.base64, "base64");
+      if (expected.length !== actual.length || !actual.equals(expected)) throw new Error("sha512 mismatch");
+      return;
+    }
+    default: {
+      const unreachable: never = digest;
+      throw new Error(String(unreachable));
+    }
+  }
+}
+
+async function fetchArchive(source: RegistrySource): Promise<Archive> {
+  switch (source.ecosystem) {
+    case "pypi": {
+      const url = `https://pypi.org/pypi/${encodeURIComponent(source.package)}/${encodeURIComponent(source.version)}/json`;
+      const pinned = pypiSdist(await fetchJson(url), source.package, source.version);
+      const bytes = await download(pinned.url);
+      const digest: ArchiveDigest = { algorithm: "sha256", hex: pinned.sha256 };
+      requireDigest(bytes, digest);
+      return { bytes, digest };
+    }
+    case "npm": {
+      const url = `https://registry.npmjs.org/${encodeURIComponent(source.package)}/${encodeURIComponent(source.version)}`;
+      const pinned = npmDist(await fetchJson(url), source.package, source.version);
+      const prefix = "sha512-";
+      if (!pinned.integrity.startsWith(prefix)) throw new Error(`npm integrity is not sha512 for ${source.package}`);
+      const bytes = await download(pinned.url);
+      const digest: ArchiveDigest = { algorithm: "sha512", base64: pinned.integrity.slice(prefix.length) };
+      requireDigest(bytes, digest);
+      return { bytes, digest };
+    }
+    default: {
+      const unreachable: never = source.ecosystem;
+      throw new Error(String(unreachable));
+    }
+  }
+}
+
+function extractArchive(archive: Archive, destination: string): void {
+  const entries = listArchiveEntries(archive.bytes);
+  refuseArchiveEntries(entries);
+  mkdirSync(destination, { recursive: true });
+  const packed = join(dirname(destination), "archive.tgz");
+  writeFileSync(packed, archive.bytes);
+  try {
+    const listed = spawnSync("tar", ["-tzf", packed], { encoding: "utf8" });
+    if (listed.status !== 0) throw new Error(`tar list failed\n${listed.stderr}`);
+    refuseArchiveEntries(
+      listed.stdout
+        .split("\n")
+        .filter((name) => name.length > 0)
+        .map((name) => ({ name, link: null })),
+    );
+    const extracted = spawnSync("tar", ["-xzf", packed, "-C", destination, "--strip-components", "1"], {
+      encoding: "utf8",
+    });
+    if (extracted.status !== 0) throw new Error(`tar extract failed\n${extracted.stderr}`);
+  } finally {
+    rmSync(packed, { force: true });
+  }
+  if (!existsSync(join(destination, "package.json")) && !existsSync(join(destination, "pyproject.toml"))) {
+    throw new Error("archive root has neither package.json nor pyproject.toml");
+  }
+}
+
+async function stageSource(target: Target, destination: string): Promise<void> {
+  switch (target.source.kind) {
+    case "local": {
+      const sourceOnHost = resolve(process.cwd(), target.source.path);
+      if (!existsSync(sourceOnHost)) throw new Error(`local source not found: ${sourceOnHost}`);
+      copyTree(sourceOnHost, destination);
+      return;
+    }
+    case "registry": {
+      extractArchive(await fetchArchive(target.source), destination);
+      return;
+    }
+    default: {
+      const unreachable: never = target.source;
+      throw new Error(String(unreachable));
+    }
+  }
+}
+
+// python:3.12-slim started the bookworm node binary, so this copy adds no apt package for node.
+// Trixie's strace 6.13 exits on the driver's --seccomp-bpf -u pair. Bookworm's strace 6.1 links only libc and accepts that pair.
+function driverRuntime(): string {
+  return `COPY --from=node:24-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=mcpdet-bins /usr/bin/strace /usr/bin/strace`;
+}
+
 function dockerfile(target: Target): string {
   const installs = target.install.map((command) => `RUN ${command}`).join("\n");
   const setups = target.setup.map((command) => `RUN ${command}`).join("\n");
-  return `FROM ${target.base_image}
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends strace ca-certificates \\
+  return `FROM node:24-bookworm-slim AS mcpdet-bins
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends strace \\
+ && rm -rf /var/lib/apt/lists/*
+FROM ${target.base_image}
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \\
  && rm -rf /var/lib/apt/lists/* \\
  && useradd --create-home --shell /bin/bash detonee \\
  && mkdir -p /trace /work /opt/mcpdet \\
@@ -289,6 +577,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     /home/detonee/.docker /home/detonee/.kube \\
  && chown -R detonee:detonee /home/detonee \\
  && chmod 700 /trace && chmod 755 /work /opt/mcpdet
+${driverRuntime()}
 COPY source/ ${target.source_path}/
 COPY ca.pem /opt/mcpdet/ca.pem
 WORKDIR ${target.source_path}
@@ -297,6 +586,7 @@ RUN chmod -R a+rX ${target.source_path} /opt/mcpdet/ca.pem \\
  && cp /opt/mcpdet/ca.pem /usr/local/share/ca-certificates/mcpdet.crt \\
  && update-ca-certificates
 ${setups}
+RUN chown -R detonee:detonee /work
 COPY driver.js /opt/mcpdet/driver.js
 WORKDIR /work
 ENTRYPOINT ["node", "/opt/mcpdet/driver.js", "/plan.json"]
@@ -468,11 +758,12 @@ async function sealFlows(runDir: string, proxyContainer: string): Promise<readon
 }
 
 export async function traceTarget(target: Target): Promise<TracedRun> {
-  if (target.source.kind !== "local") throw new Error(`registry source is not supported for ${target.name}`);
+  if (target.source.kind === "local") {
+    const sourceOnHost = resolve(process.cwd(), target.source.path);
+    if (!existsSync(sourceOnHost)) throw new Error(`local source not found: ${sourceOnHost}`);
+  }
   const runId = `${target.name}-${randomBytes(4).toString("hex")}`;
   const runDir = resolve(process.cwd(), "runs", runId);
-  const sourceOnHost = resolve(process.cwd(), target.source.path);
-  if (!existsSync(sourceOnHost)) throw new Error(`local source not found: ${sourceOnHost}`);
   const driverJs = fileURLToPath(new URL("./driver.js", import.meta.url));
   if (!existsSync(driverJs)) throw new Error(`compiled driver is missing: ${driverJs}`);
 
@@ -490,7 +781,7 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
   const proxyContainer = proxyContainerName(runId);
   let allowNetwork: string | null = null;
   try {
-    copyTree(sourceOnHost, join(context, "source"));
+    await stageSource(target, join(context, "source"));
     copyFileSync(driverJs, join(context, "driver.js"));
     writeFileSync(join(context, "ca.pem"), `${ca.certPem}\n`);
     writeFileSync(join(context, "Dockerfile"), dockerfile(target));
@@ -530,7 +821,7 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
         throw new Error(String(unreachable));
       }
     }
-    writeHostSeal(runDir, { image_id: imageId, source_path: target.source.path });
+    writeHostSeal(runDir, { image_id: imageId, source_path: sealSourcePath(target.source) });
     return {
       runDir,
       transcriptPath: join(runDir, "transcript.jsonl"),
