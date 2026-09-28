@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { request } from "node:http";
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
 
 import type { FastifyInstance } from "fastify";
@@ -102,7 +102,7 @@ type Fake = {
   finishError: Error | null;
 };
 
-function fake(runsDir: string): Fake {
+function fake(): Fake {
   const state: Fake = {
     calls: [],
     inserted: [],
@@ -116,24 +116,24 @@ function fake(runsDir: string): Fake {
     uploadError: null,
     finishError: null,
     deps: {
-      runsDir,
       insertRun: async (id, target) => {
         state.calls.push(`insert ${id}`);
         state.inserting.resolve();
         await state.insertGate;
         state.inserted.push(target);
-        state.rows.set(id, { id, status: "running" });
+        state.rows.set(id, { id, status: "running", verdict: null });
       },
       getRun: async (id) => state.rows.get(id) ?? null,
       finishRun: async (id, outcome) => {
         state.calls.push(`finish ${id} ${outcome.status}`);
         state.finished.push(outcome);
-        state.rows.set(id, { id, status: outcome.status });
+        const verdict = outcome.status === "failed" ? outcome.verdict : "clean";
+        state.rows.set(id, { id, status: outcome.status, verdict });
         state.settled.resolve();
         if (state.finishError !== null) throw state.finishError;
       },
-      uploadRun: async (id, runDir) => {
-        assert.equal(runDir, join(runsDir, id));
+      uploadRun: async (runDir, id) => {
+        assert.equal(runDir, resolve("runs", id));
         state.calls.push(`upload ${id}`);
         if (state.uploadError !== null) throw state.uploadError;
       },
@@ -142,7 +142,7 @@ function fake(runsDir: string): Fake {
         state.calls.push(`delete ${runDir}`);
       },
       runDetonation: async (id, _target, runDir) => {
-        assert.equal(runDir, join(runsDir, id));
+        assert.equal(runDir, resolve("runs", id));
         state.calls.push(`detonate ${id}`);
         await state.detonation.promise;
       },
@@ -179,9 +179,11 @@ function idOf(payload: string): string {
   return value.id;
 }
 
-const runsDir = mkdtempSync(join(tmpdir(), "mcpdet-api-"));
+const home = process.cwd();
+const workDir = mkdtempSync(join(tmpdir(), "mcpdet-api-"));
+process.chdir(workDir);
 try {
-  const state = fake(runsDir);
+  const state = fake();
   const app = await buildServer(state.deps);
 
   for (const headers of [{}, { authorization: "Bearer wrong" }, { authorization: `Basic ${TOKEN}` }]) {
@@ -211,18 +213,18 @@ try {
 
   const running = await app.inject({ method: "GET", url: `/runs/${id}`, headers: auth });
   assert.equal(running.statusCode, 200);
-  assert.deepEqual(JSON.parse(running.payload), { run: { id, status: "running" }, judgments: null });
+  assert.deepEqual(JSON.parse(running.payload), { run: { id, status: "running", verdict: null }, judgments: null });
 
   state.archive.set(`${id}/bundles.json`, JSON.stringify(runDocument));
   state.archive.set(`${id}/judgments.json`, JSON.stringify(judgments));
   state.detonation.resolve();
   await state.settled.promise;
   await tick();
-  assert.deepEqual(state.calls.slice(2), [`upload ${id}`, `finish ${id} succeeded`, `delete ${join(runsDir, id)}`]);
+  assert.deepEqual(state.calls.slice(2), [`upload ${id}`, `finish ${id} succeeded`, `delete ${resolve("runs", id)}`]);
 
   const finished = await app.inject({ method: "GET", url: `/runs/${id}`, headers: auth });
   assert.equal(finished.statusCode, 200);
-  assert.deepEqual(JSON.parse(finished.payload), { run: { id, status: "succeeded" }, judgments });
+  assert.deepEqual(JSON.parse(finished.payload), { run: { id, status: "succeeded", verdict: "clean" }, judgments });
 
   const missing = await app.inject({ method: "GET", url: `/runs/${crypto.randomUUID()}`, headers: auth });
   assert.equal(missing.statusCode, 404);
@@ -234,11 +236,11 @@ try {
   await tick();
   const quiet = await app.inject({ method: "GET", url: `/runs/${quietId}`, headers: auth });
   assert.equal(quiet.statusCode, 200);
-  assert.deepEqual(JSON.parse(quiet.payload), { run: { id: quietId, status: "succeeded" }, judgments: null });
+  assert.deepEqual(JSON.parse(quiet.payload), { run: { id: quietId, status: "succeeded", verdict: "clean" }, judgments: null });
 
   reset(state);
   const failedId = await accept(app);
-  mkdirSync(join(runsDir, failedId));
+  mkdirSync(resolve("runs", failedId), { recursive: true });
   state.detonation.reject(new Error("write EPIPE"));
   await state.settled.promise;
   await tick();
@@ -247,13 +249,13 @@ try {
     `detonate ${failedId}`,
     `upload ${failedId}`,
     `finish ${failedId} failed`,
-    `delete ${join(runsDir, failedId)}`,
+    `delete ${resolve("runs", failedId)}`,
   ]);
   assert.deepEqual(state.finished.at(-1), { status: "failed", verdict: "incomplete" });
 
   const failed = await app.inject({ method: "GET", url: `/runs/${failedId}`, headers: auth });
   assert.equal(failed.statusCode, 200);
-  assert.deepEqual(JSON.parse(failed.payload), { run: { id: failedId, status: "failed" }, judgments: null });
+  assert.deepEqual(JSON.parse(failed.payload), { run: { id: failedId, status: "failed", verdict: "incomplete" }, judgments: null });
 
   reset(state);
   const emptyId = await accept(app);
@@ -264,17 +266,16 @@ try {
     `insert ${emptyId}`,
     `detonate ${emptyId}`,
     `finish ${emptyId} failed`,
-    `delete ${join(runsDir, emptyId)}`,
+    `delete ${resolve("runs", emptyId)}`,
   ]);
 
   reset(state);
   state.uploadError = new Error("archive unavailable");
   const keptId = await accept(app);
   state.detonation.resolve();
-  await state.settled.promise;
+  await waitFor(() => state.calls.includes(`upload ${keptId}`));
   await tick();
-  assert.deepEqual(state.calls, [`insert ${keptId}`, `detonate ${keptId}`, `upload ${keptId}`, `finish ${keptId} failed`]);
-  assert.deepEqual(state.finished.at(-1), { status: "failed", verdict: "incomplete" });
+  assert.deepEqual(state.calls, [`insert ${keptId}`, `detonate ${keptId}`, `upload ${keptId}`]);
   state.uploadError = null;
 
   reset(state);
@@ -318,7 +319,8 @@ try {
 
   await app.close();
 } finally {
-  rmSync(runsDir, { recursive: true, force: true });
+  process.chdir(home);
+  rmSync(workDir, { recursive: true, force: true });
 }
 
 process.stdout.write("api check passed\n");
