@@ -108,7 +108,7 @@ Each part of `mcpdet` has one job:
 | Static profile | Reads the installed package without running it. Lists dependencies, install scripts, tool descriptions, and source lines that touch files, the network, or subprocesses. Flags tool descriptions that hide characters or contain instruction-like phrases such as "do not tell the user". |
 | Attribution | Places every event into exactly one bundle, or into the unmatched bucket. |
 | Side-effect rules | Six fixed rules name what happened. The rules cover spawned processes, modified files, credential access, network attempts, code loaded late, and exposed decoy secrets. |
-| Judge | Asks an LLM, through OpenRouter, whether each tool call matches its claims. Every citation is checked against the bundle, and answers are saved so the report can be rebuilt identically. |
+| Judge | Asks Claude Sonnet, through the Anthropic API, whether each tool call matches its claims. Every citation is checked against the bundle, and answers are saved so the report can be rebuilt identically. |
 | Report | Writes `report.md` for people and `bundles.json` for machines. |
 
 Raw artifacts (the trace and the message transcript) are the source of truth. Everything after them can be rebuilt with `mcpdet report` without running the server again.
@@ -187,4 +187,4 @@ mcpdet report runs/<run-id>
 
 A target file names the package and pinned version, or a local source folder, plus the server command and the tool calls to make. It can also set `network = "block"` for a run that must not leave the container. `mcpdet` installs its own copy inside the container. It never runs the copy already installed on your machine.
 
-Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Node 24. The judge also needs `OPENROUTER_API_KEY`. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
+Requirements are macOS with Docker Desktop or Linux with Docker Engine, plus Node 24. The judge also needs `ANTHROPIC_API_KEY`, set in the shell or in a `.env` file in the directory you run `mcpdet` from. Without it, the run still completes and the report says the judge was not run. `--no-judge` skips it on purpose, for source that must not leave the machine.
