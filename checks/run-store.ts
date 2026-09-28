@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { eq, sql } from "drizzle-orm";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 import { openDb } from "../src/app/db/client.js";
 import type { Db } from "../src/app/db/client.js";
@@ -125,14 +126,6 @@ function checkVerdict(): void {
   assert.equal(rollupVerdict(judgments(run, ["unclear", "invalid"])), "fail");
 }
 
-function migrationStatements(): string[] {
-  const text = readFileSync(join(root, "db/migrations/0000_runs.sql"), "utf8");
-  return text
-    .split("--> statement-breakpoint")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
-}
-
 function withSearchPath(url: string, schema: string): string {
   const parsed = new URL(url);
   parsed.searchParams.set("options", `-c search_path=${schema}`);
@@ -223,10 +216,34 @@ async function checkLocalWithoutDownload(db: Db): Promise<void> {
   assert.ok(finished.endedAt instanceof Date);
 }
 
-function errorCode(error: unknown): unknown {
+async function checkUnjudgedAndCrashed(db: Db): Promise<void> {
+  const unjudged = randomUUID();
+  await insertRun(db, { id: unjudged, target: registryTarget, startedAt: new Date() });
+  const run = runFor(registryTarget);
+  await finishRun(db, { id: unjudged, run, judgments: null, downloadUrl: null, status: "succeeded", endedAt: new Date() });
+  const judgeSkipped = await rowOf(db, unjudged);
+  assert.equal(judgeSkipped.status, "succeeded");
+  assert.equal(judgeSkipped.verdict, "incomplete");
+  assert.equal(judgeSkipped.mcpServerName, "detfix-server");
+
+  const crashed = randomUUID();
+  await insertRun(db, { id: crashed, target: localTarget, startedAt: new Date() });
+  const downloadUrl = `https://runs.example/${crashed}.tar.gz`;
+  await finishRun(db, { id: crashed, run: null, downloadUrl, status: "failed", endedAt: new Date() });
+  const partial = await rowOf(db, crashed);
+  assert.equal(partial.status, "failed");
+  assert.equal(partial.verdict, "incomplete");
+  assert.equal(partial.mcpServerName, null);
+  assert.equal(partial.downloadUrl, downloadUrl);
+  assert.ok(partial.endedAt instanceof Date);
+}
+
+function violatedCheck(error: unknown): unknown {
   let current: unknown = error;
   while (current instanceof Error) {
-    if ("code" in current) return current.code;
+    if ("code" in current && "constraint" in current) {
+      return current.code === "23514" ? current.constraint : `sqlstate ${String(current.code)}`;
+    }
     current = current.cause;
   }
   return undefined;
@@ -250,22 +267,25 @@ async function checkIllegalRows(db: Db): Promise<void> {
     db.execute(
       sql.raw(`insert into runs (${Object.keys(row).join(", ")}) values (${Object.values(row).join(", ")})`),
     );
-  const illegal: readonly [string, Partial<typeof legal>][] = [
-    ["running with a verdict", { verdict: "'pass'" }],
-    ["running with an end", { ended_at: "now()" }],
-    ["finished without an end", { status: "'succeeded'", verdict: "'pass'" }],
-    ["finished without a verdict", { status: "'failed'", ended_at: "now()" }],
-    ["unknown status", { status: "'done'", ended_at: "now()", verdict: "'pass'" }],
-    ["unknown verdict", { status: "'succeeded'", ended_at: "now()", verdict: "'maybe'" }],
-    ["unknown ecosystem", { ecosystem: "'cargo'" }],
-    ["unknown source kind", { source_kind: "'git'" }],
-    ["registry without a version", { package_version: "null" }],
-    ["registry without a package", { package_name: "null" }],
-    ["local with a package", { source_kind: "'local'", package_version: "null" }],
-    ["local with a version", { source_kind: "'local'", package_name: "null" }],
+  const illegal: readonly [string, string, Partial<typeof legal>][] = [
+    ["running with a verdict", "runs_finish_check", { verdict: "'pass'" }],
+    ["running with an end", "runs_finish_check", { ended_at: "now()" }],
+    ["finished without an end", "runs_finish_check", { status: "'succeeded'", verdict: "'pass'" }],
+    ["finished without a verdict", "runs_finish_check", { status: "'failed'", ended_at: "now()" }],
+    ["unknown status", "runs_status_check", { status: "'done'", ended_at: "now()", verdict: "'pass'" }],
+    ["unknown verdict", "runs_verdict_check", { status: "'succeeded'", ended_at: "now()", verdict: "'maybe'" }],
+    ["unknown ecosystem", "runs_ecosystem_check", { ecosystem: "'cargo'" }],
+    ["unknown source kind", "runs_source_check", { source_kind: "'git'" }],
+    ["registry without a version", "runs_source_check", { package_version: "null" }],
+    ["registry without a package", "runs_source_check", { package_name: "null" }],
+    ["local with a package", "runs_source_check", { source_kind: "'local'", package_version: "null" }],
+    ["local with a version", "runs_source_check", { source_kind: "'local'", package_name: "null" }],
   ];
-  for (const [name, change] of illegal) {
-    await assert.rejects(insert({ ...legal, ...change }), (error) => errorCode(error) === "23514", name);
+  for (const [name, constraint, change] of illegal) {
+    await assert.rejects(insert({ ...legal, ...change }), (error) => {
+      assert.equal(violatedCheck(error), constraint, name);
+      return true;
+    });
   }
   await insert(legal);
   await insert({ ...legal, id: "'local'", source_kind: "'local'", package_name: "null", package_version: "null" });
@@ -276,6 +296,21 @@ async function checkIllegalRows(db: Db): Promise<void> {
   );
   assert.equal(indexes.rows.length, 1);
   assert.match(String(indexes.rows[0]?.["indexdef"]), /\(server_key\)$/);
+
+  const checks = await db.execute(
+    sql`select conname from pg_constraint where conrelid = 'runs'::regclass and contype = 'c' order by conname`,
+  );
+  assert.deepEqual(
+    checks.rows.map((row: Record<string, unknown>) => row["conname"]),
+    [
+      "runs_ecosystem_check",
+      "runs_finish_check",
+      "runs_source_check",
+      "runs_source_kind_check",
+      "runs_status_check",
+      "runs_verdict_check",
+    ],
+  );
 }
 
 async function checkStore(url: string): Promise<void> {
@@ -284,9 +319,10 @@ async function checkStore(url: string): Promise<void> {
   await admin.db.execute(sql.raw(`create schema ${schema}`));
   const scoped = openDb(withSearchPath(url, schema));
   try {
-    for (const statement of migrationStatements()) await scoped.db.execute(sql.raw(statement));
+    await migrate(scoped.db, { migrationsFolder: join(root, "db/migrations"), migrationsSchema: schema });
     await checkInsertAndFinish(scoped.db);
     await checkLocalWithoutDownload(scoped.db);
+    await checkUnjudgedAndCrashed(scoped.db);
     await checkIllegalRows(scoped.db);
   } finally {
     await scoped.close();
