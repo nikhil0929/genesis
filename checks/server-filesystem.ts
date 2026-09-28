@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseFindings, parseRun } from "../src/model.js";
 import type { CallOutcome, Event, EventId, FileAccess, Finding, Run, ToolCallBundle, ToolCallEntry } from "../src/model.js";
 
@@ -123,17 +125,9 @@ function citesCredential(findings: readonly Finding[], call: ToolCallBundle, eve
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const result = spawnSync(
-  process.execPath,
-  ["dist/src/app/cli.js", "detonate", "targets/server-filesystem.toml", "--no-judge"],
-  {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 900_000,
-  },
-);
-assert.equal(result.status, 0, result.stderr || result.stdout);
-const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
+const id = randomUUID();
+await runDetonation(loadTarget(join(root, "targets/server-filesystem.toml")), "skip", id);
+const runDir = scratchDir(id);
 const bundlesPath = join(runDir, "bundles.json");
 const findingsPath = join(runDir, "findings.json");
 const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);

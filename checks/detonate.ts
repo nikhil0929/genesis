@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,8 @@ import {
   parseRun,
 } from "../src/model.js";
 import type { Event, ToolCallBundle } from "../src/model.js";
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { readEnvelope } from "../src/engine/host-seal.js";
 import { readSensors } from "../src/engine/sensors/index.js";
 
@@ -109,13 +111,9 @@ function callNamed(calls: readonly ToolCallBundle[], name: string): ToolCallBund
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", "targets/detfix.toml"], {
-  cwd: root,
-  encoding: "utf8",
-  timeout: 600_000,
-});
-assert.equal(result.status, 0, result.stderr || result.stdout);
-const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
+const id = randomUUID();
+await runDetonation(loadTarget(join(root, "targets/detfix.toml")), "if_absent", id);
+const runDir = scratchDir(id);
 const bundlesPath = join(runDir, "bundles.json");
 const run = parseRun(readFileSync(bundlesPath, "utf8"), bundlesPath);
 const { events } = readSensors(runDir, readEnvelope(runDir).network);
