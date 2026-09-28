@@ -13,8 +13,8 @@ import {
   parseRun,
 } from "../src/model.js";
 import type { Event, ToolCallBundle } from "../src/model.js";
-import { readEnvelope } from "../src/host-seal.js";
-import { readSensors } from "../src/sensors/index.js";
+import { readEnvelope } from "../src/engine/host-seal.js";
+import { readSensors } from "../src/engine/sensors/index.js";
 
 function isFileWrite(event: Event): boolean {
   switch (event.body.kind) {
@@ -109,7 +109,7 @@ function callNamed(calls: readonly ToolCallBundle[], name: string): ToolCallBund
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", "targets/detfix.toml"], {
+const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", "targets/detfix.toml"], {
   cwd: root,
   encoding: "utf8",
   timeout: 600_000,

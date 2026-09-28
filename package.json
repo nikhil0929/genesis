@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "bin": {
-    "mcpdet": "dist/src/cli.js"
+    "mcpdet": "dist/src/app/cli.js"
   },
   "exports": {
     "./model": {

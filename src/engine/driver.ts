@@ -4,7 +4,7 @@ import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
-import type { DriverPlan, DriverTimelineEntry, JsonObject, JsonValue, RpcSummary } from "./model.js";
+import type { DriverPlan, DriverTimelineEntry, JsonObject, JsonValue, RpcSummary } from "../model.js";
 
 type ListedTool = {
   readonly name: string;

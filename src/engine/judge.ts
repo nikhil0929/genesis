@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import Anthropic from "@anthropic-ai/sdk";
 
-import { parseJudgeAnswer, parseJudgments } from "./model.js";
+import { parseJudgeAnswer, parseJudgments } from "../model.js";
 import type {
   EventId,
   Finding,
@@ -12,7 +12,7 @@ import type {
   StaticProfile,
   ToolCallBundle,
   ToolDefinition,
-} from "./model.js";
+} from "../model.js";
 
 export type JudgeMode = "skip" | "if_absent" | "again";
 

@@ -3,8 +3,8 @@ import { extname, join, relative, sep } from "node:path";
 
 import { parse as parseToml, TomlError } from "smol-toml";
 
-import { BoundaryError, parseStaticProfile, parseToolsPage, parseTranscript } from "./model.js";
-import type { ApiHintCategory, StaticProfile, ToolDefinition } from "./model.js";
+import { BoundaryError, parseStaticProfile, parseToolsPage, parseTranscript } from "../model.js";
+import type { ApiHintCategory, StaticProfile, ToolDefinition } from "../model.js";
 import { rawPath } from "./run-dir.js";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };

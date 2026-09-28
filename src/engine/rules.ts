@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-import { RULE_NAMES } from "./model.js";
+import { RULE_NAMES } from "../model.js";
 import type {
   CallDefinition,
   Canary,
@@ -20,7 +20,7 @@ import type {
   SourceHint,
   StaticProfile,
   WriteTarget,
-} from "./model.js";
+} from "../model.js";
 
 const RULE_TABLE: {
   readonly keywords: { readonly [Rule in RuleName]: readonly string[] };

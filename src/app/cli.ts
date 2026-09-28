@@ -2,11 +2,11 @@ import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { parseTarget } from "./model.js";
-import type { Target } from "./model.js";
-import { publishRun } from "./report.js";
-import { rawPath } from "./run-dir.js";
-import { traceTarget } from "./sandbox.js";
+import { publishRun } from "../engine/report.js";
+import { rawPath } from "../engine/run-dir.js";
+import { traceTarget } from "../engine/sandbox.js";
+import { parseTarget } from "../model.js";
+import type { Target } from "../model.js";
 
 type Command =
   | { readonly kind: "detonate"; readonly targetPath: string; readonly mode: "skip" | "if_absent" }

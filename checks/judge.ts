@@ -19,7 +19,7 @@ function cli(
   args: readonly string[],
   env?: NodeJS.ProcessEnv,
 ): { status: number | null; stdout: string; stderr: string; error: string } {
-  const result = spawnSync(process.execPath, ["dist/src/cli.js", ...args], {
+  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", ...args], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,

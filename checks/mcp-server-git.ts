@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseFindings, parseRun } from "../src/model.js";
-import { profileSources } from "../src/static-profile.js";
+import { profileSources } from "../src/engine/static-profile.js";
 import type { Finding, Run, ToolCallBundle } from "../src/model.js";
 
 const scenarioGit: readonly { readonly tool: string; readonly subcommand: string }[] = [
@@ -63,7 +63,7 @@ function gitCommitWroteDotGit(findings: readonly Finding[], call: ToolCallBundle
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const result = spawnSync(
   process.execPath,
-  ["dist/src/cli.js", "detonate", "targets/mcp-server-git.toml", "--no-judge"],
+  ["dist/src/app/cli.js", "detonate", "targets/mcp-server-git.toml", "--no-judge"],
   { cwd: root, encoding: "utf8", timeout: 900_000 },
 );
 assert.equal(result.status, 0, result.stderr || result.stdout);

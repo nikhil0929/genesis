@@ -28,8 +28,8 @@ import {
   parseCanaries,
   parseFlows,
   parsePlan,
-} from "./model.js";
-import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
+} from "../model.js";
+import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "../model.js";
 import { sealSourcePath, writeHostSeal } from "./host-seal.js";
 import { rawPath } from "./run-dir.js";
 import { pruneUnscanned } from "./static-profile.js";
