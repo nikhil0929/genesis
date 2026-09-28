@@ -1,0 +1,151 @@
+{
+  "id": "c2e9ee8d-68b0-4303-94b7-5e2db72479ee",
+  "prevId": "00000000-0000-0000-0000-000000000000",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.runs": {
+      "name": "runs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "target_name": {
+          "name": "target_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mcp_server_name": {
+          "name": "mcp_server_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "server_key": {
+          "name": "server_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_kind": {
+          "name": "source_kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "package_name": {
+          "name": "package_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_version": {
+          "name": "package_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ecosystem": {
+          "name": "ecosystem",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "download_url": {
+          "name": "download_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "runs_server_key": {
+          "name": "runs_server_key",
+          "columns": [
+            {
+              "expression": "server_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "runs_source_kind_check": {
+          "name": "runs_source_kind_check",
+          "value": "\"runs\".\"source_kind\" in ('registry', 'local')"
+        },
+        "runs_ecosystem_check": {
+          "name": "runs_ecosystem_check",
+          "value": "\"runs\".\"ecosystem\" in ('npm', 'pypi')"
+        },
+        "runs_status_check": {
+          "name": "runs_status_check",
+          "value": "\"runs\".\"status\" in ('running', 'succeeded', 'failed')"
+        },
+        "runs_verdict_check": {
+          "name": "runs_verdict_check",
+          "value": "\"runs\".\"verdict\" in ('pass', 'fail', 'incomplete')"
+        },
+        "runs_finish_check": {
+          "name": "runs_finish_check",
+          "value": "(\"runs\".\"status\" = 'running' and \"runs\".\"ended_at\" is null and \"runs\".\"verdict\" is null)\n    or (\"runs\".\"status\" <> 'running' and \"runs\".\"ended_at\" is not null and \"runs\".\"verdict\" is not null)"
+        },
+        "runs_source_check": {
+          "name": "runs_source_check",
+          "value": "(\"runs\".\"source_kind\" = 'registry' and \"runs\".\"package_name\" is not null and \"runs\".\"package_version\" is not null)\n    or (\"runs\".\"source_kind\" = 'local' and \"runs\".\"package_name\" is null and \"runs\".\"package_version\" is null)"
+        }
+      },
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}
