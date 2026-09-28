@@ -28,6 +28,7 @@ import {
   parseCanaries,
   parseFlows,
   parsePlan,
+  runIdSchema,
 } from "../model.js";
 import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "../model.js";
 import { sealSourcePath, writeHostSeal } from "./host-seal.js";
@@ -45,6 +46,7 @@ export type RunEnvelope = {
 export type TracedRun = {
   readonly runDir: string;
   readonly envelope: RunEnvelope;
+  readonly downloadUrl: string | null;
 };
 
 type ProxyCa = {
@@ -285,6 +287,7 @@ type ArchiveDigest =
 type Archive = {
   readonly bytes: Buffer;
   readonly digest: ArchiveDigest;
+  readonly url: string;
 };
 
 type ArchiveEntry = {
@@ -490,7 +493,7 @@ async function fetchArchive(source: RegistrySource): Promise<Archive> {
       const bytes = await download(pinned.url);
       const digest: ArchiveDigest = { algorithm: "sha256", hex: pinned.sha256 };
       requireDigest(bytes, digest);
-      return { bytes, digest };
+      return { bytes, digest, url: pinned.url };
     }
     case "npm": {
       const url = `https://registry.npmjs.org/${encodeURIComponent(source.package)}/${encodeURIComponent(source.version)}`;
@@ -500,7 +503,7 @@ async function fetchArchive(source: RegistrySource): Promise<Archive> {
       const bytes = await download(pinned.url);
       const digest: ArchiveDigest = { algorithm: "sha512", base64: pinned.integrity.slice(prefix.length) };
       requireDigest(bytes, digest);
-      return { bytes, digest };
+      return { bytes, digest, url: pinned.url };
     }
     default: {
       const unreachable: never = source.ecosystem;
@@ -536,17 +539,18 @@ function extractArchive(archive: Archive, destination: string): void {
   }
 }
 
-async function stageSource(target: Target, destination: string): Promise<void> {
+async function stageSource(target: Target, destination: string): Promise<string | null> {
   switch (target.source.kind) {
     case "local": {
       const sourceOnHost = resolve(process.cwd(), target.source.path);
       if (!existsSync(sourceOnHost)) throw new Error(`local source not found: ${sourceOnHost}`);
       copyTree(sourceOnHost, destination);
-      return;
+      return null;
     }
     case "registry": {
-      extractArchive(await fetchArchive(target.source), destination);
-      return;
+      const archive = await fetchArchive(target.source);
+      extractArchive(archive, destination);
+      return archive.url;
     }
     default: {
       const unreachable: never = target.source;
@@ -769,13 +773,19 @@ async function sealFlows(runDir: string, proxyContainer: string): Promise<readon
   return flows;
 }
 
-export async function traceTarget(target: Target): Promise<TracedRun> {
+export function resolveRunId(name: string, requested?: string): string {
+  if (requested === undefined) return `${name}-${randomBytes(4).toString("hex")}`;
+  if (requested === requested.toLowerCase() && runIdSchema.safeParse(requested).success) return requested;
+  throw new Error(`invalid run id: ${requested}`);
+}
+
+export async function traceTarget(target: Target, requested?: string): Promise<TracedRun> {
   if (target.source.kind === "local") {
     const sourceOnHost = resolve(process.cwd(), target.source.path);
     if (!existsSync(sourceOnHost)) throw new Error(`local source not found: ${sourceOnHost}`);
   }
-  const runId = `${target.name}-${randomBytes(4).toString("hex")}`;
-  const runDir = resolve(process.cwd(), "runs", runId);
+  const id = resolveRunId(target.name, requested);
+  const runDir = join(tmpdir(), "mcpdet", id);
   const driverJs = fileURLToPath(new URL("./driver.js", import.meta.url));
   if (!existsSync(driverJs)) throw new Error(`compiled driver is missing: ${driverJs}`);
 
@@ -785,13 +795,13 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
   const staging = stageDecoys(canaries);
 
   const context = mkdtempSync(join(tmpdir(), "mcpdet-"));
-  const image = `mcpdet-${runId}`;
-  const container = `mcpdet-${runId}`;
+  const image = `mcpdet-${id}`;
+  const container = `mcpdet-${id}`;
   const sourceContainer = `${container}-source`;
-  const proxyContainer = proxyContainerName(runId);
+  const proxyContainer = proxyContainerName(id);
   let allowNetwork: string | null = null;
   try {
-    await stageSource(target, join(context, "source"));
+    const downloadUrl = await stageSource(target, join(context, "source"));
     copyFileSync(driverJs, join(context, "driver.js"));
     writeFileSync(join(context, "ca.pem"), `${ca.certPem}\n`);
     writeFileSync(join(context, "Dockerfile"), dockerfile(target));
@@ -821,8 +831,8 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
         break;
       }
       case "allow": {
-        allowNetwork = internalNetworkName(runId);
-        const started = await startProxy(runId, ca);
+        allowNetwork = internalNetworkName(id);
+        const started = await startProxy(id, ca);
         const planPath = writePlan(context, target, canaries, started.proxy);
         await createTarget(image, container, resolvPath, { kind: "allow", internalName: started.internalName });
         await installInto(container, planPath, staging, canaries);
@@ -838,8 +848,9 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
     writeHostSeal(runDir, { image_id: imageId, source_path: sealSourcePath(target.source) });
     return {
       runDir,
+      downloadUrl,
       envelope: {
-        runId,
+        runId: id,
         target: {
           name: target.name,
           source: target.source,
