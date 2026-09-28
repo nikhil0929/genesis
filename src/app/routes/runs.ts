@@ -25,7 +25,6 @@ export type RunsDeps = {
   readonly getRun: (id: string) => Promise<RunRow | null>;
   readonly finishRun: (id: string, outcome: RunOutcome) => Promise<void>;
   readonly uploadRun: (id: string, runDir: string) => Promise<void>;
-  /** Resolves to null when the object is not in the archive. */
   readonly readArchive: (id: string, name: string) => Promise<string | null>;
   readonly deleteLocalRun: (runDir: string) => Promise<void>;
   readonly runDetonation: (id: string, target: Target, runDir: string) => Promise<void>;
@@ -40,32 +39,28 @@ function withWorkingSource(target: Target): Target {
 export const runsRoutes: FastifyPluginAsyncZod<RunsDeps> = async (app, deps) => {
   let inFlight: string | null = null;
 
-  // The local directory is deleted only once the archive and the row both hold the result.
+  async function succeeded(step: () => Promise<void>, context: object, message: string): Promise<boolean> {
+    try {
+      await step();
+      return true;
+    } catch (error) {
+      app.log.error({ ...context, err: error }, message);
+      return false;
+    }
+  }
+
   async function settle(id: string, target: Target): Promise<void> {
     const runDir = join(deps.runsDir, id);
-    try {
-      let outcome: RunOutcome = { status: "succeeded" };
-      try {
-        await deps.runDetonation(id, target, runDir);
-      } catch (error) {
-        app.log.error({ err: error, id }, "detonation failed");
-        outcome = { status: "failed", verdict: "incomplete" };
-      }
-      let archived = true;
-      try {
-        if (outcome.status === "succeeded" || existsSync(runDir)) await deps.uploadRun(id, runDir);
-      } catch (error) {
-        app.log.error({ err: error, id, runDir }, "upload failed, keeping the local run");
-        outcome = { status: "failed", verdict: "incomplete" };
-        archived = false;
-      }
-      await deps.finishRun(id, outcome);
-      if (archived) await deps.deleteLocalRun(runDir);
-    } catch (error) {
-      app.log.error({ err: error, id, runDir }, "run did not settle, keeping the local run");
-    } finally {
-      inFlight = null;
-    }
+    const context = { id, runDir };
+    const detonated = await succeeded(() => deps.runDetonation(id, target, runDir), context, "detonation failed");
+    const archived =
+      (!detonated && !existsSync(runDir)) ||
+      (await succeeded(() => deps.uploadRun(id, runDir), context, "upload failed, keeping the local run"));
+    const outcome: RunOutcome =
+      detonated && archived ? { status: "succeeded" } : { status: "failed", verdict: "incomplete" };
+    const recorded = await succeeded(() => deps.finishRun(id, outcome), context, "finish failed, keeping the local run");
+    if (archived && recorded) await succeeded(() => deps.deleteLocalRun(runDir), context, "local delete failed");
+    inFlight = null;
   }
 
   async function loadJudgments(id: string): Promise<readonly Judgment[] | null> {

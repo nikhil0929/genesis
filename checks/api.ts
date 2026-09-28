@@ -99,6 +99,7 @@ type Fake = {
   inserting: Deferred;
   insertGate: Promise<void>;
   uploadError: Error | null;
+  finishError: Error | null;
 };
 
 function fake(runsDir: string): Fake {
@@ -113,6 +114,7 @@ function fake(runsDir: string): Fake {
     inserting: deferred(),
     insertGate: Promise.resolve(),
     uploadError: null,
+    finishError: null,
     deps: {
       runsDir,
       insertRun: async (id, target) => {
@@ -128,6 +130,7 @@ function fake(runsDir: string): Fake {
         state.finished.push(outcome);
         state.rows.set(id, { id, status: outcome.status });
         state.settled.resolve();
+        if (state.finishError !== null) throw state.finishError;
       },
       uploadRun: async (id, runDir) => {
         assert.equal(runDir, join(runsDir, id));
@@ -273,6 +276,20 @@ try {
   assert.deepEqual(state.calls, [`insert ${keptId}`, `detonate ${keptId}`, `upload ${keptId}`, `finish ${keptId} failed`]);
   assert.deepEqual(state.finished.at(-1), { status: "failed", verdict: "incomplete" });
   state.uploadError = null;
+
+  reset(state);
+  state.finishError = new Error("database unavailable");
+  const unrecordedId = await accept(app);
+  state.detonation.resolve();
+  await state.settled.promise;
+  await tick();
+  assert.deepEqual(state.calls, [
+    `insert ${unrecordedId}`,
+    `detonate ${unrecordedId}`,
+    `upload ${unrecordedId}`,
+    `finish ${unrecordedId} succeeded`,
+  ]);
+  state.finishError = null;
 
   reset(state);
   const gate = deferred();
