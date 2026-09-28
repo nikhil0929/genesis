@@ -20,9 +20,11 @@ Attaching `/poteto-mode` on the parent message does not apply it to the worker.
 
 Later agents import that module. They do not edit it. Additive type changes go back to the runtime owner as a single follow-up, so the unions stay in one file.
 
-`src/cli.ts` has one owner for the whole project, the runtime agent. Other agents export a function. The runtime agent is the only one who calls it.
+`src/app/cli.ts` has one owner for the whole project, the runtime agent. Other agents export a function. The runtime agent is the only one who calls it.
 
 ## Agents
+
+During the build, this ownership list used the old flat paths such as `src/sandbox.ts` and `src/cli.ts`, before those modules moved under `src/engine/` and `src/app/`.
 
 ### 1. Contract
 
@@ -36,7 +38,7 @@ Done when `tsc` succeeds and a second package can import the run type.
 
 Starts from the contract branch. Two phases, same owner, because the container lifecycle is one clock.
 
-Phase A is build step 1. Owns `src/sandbox.ts`, `src/driver.ts`, `src/sensors/`, `src/attribution.ts`, `src/cli.ts`, `fixtures/detfix/` (`echo`, `spawn_and_linger`, `delayed_write`), `targets/detfix.toml`, and `checks/` for that step.
+Phase A is build step 1. Owns `src/engine/sandbox.ts`, `src/engine/driver.ts`, `src/engine/sensors/`, `src/engine/attribution.ts`, `src/app/cli.ts`, `fixtures/detfix/` (`echo`, `spawn_and_linger`, `delayed_write`), `targets/detfix.toml`, and `checks/` for that step.
 
 Phase B is build step 2's container work, after phase A is green. Owns decoy planting, the resolver file, DNS decoding, `proxy/mcpdet_addon.py`, flow join, and the `word_count` and `load_plugin` tools. Calls `rules` once that module exists.
 
@@ -46,7 +48,7 @@ Needs Docker. The design's host is macOS with Docker Desktop, or Linux with Dock
 
 Starts from the contract branch, in parallel with runtime phase A.
 
-Owns `src/rules.ts` only. Pure function from a parsed run to findings. The keyword lists, sensitive paths, and code extensions live in one table in that file. Its check feeds a synthetic `bundles.json` that matches the frozen types and asserts literal findings. It does not start a container.
+Owns `src/engine/rules.ts` only. Pure function from a parsed run to findings. The keyword lists, sensitive paths, and code extensions live in one table in that file. Its check feeds a synthetic `bundles.json` that matches the frozen types and asserts literal findings. It does not start a container.
 
 The live `word_count` assertions stay in the runtime agent's slice 2 check.
 
@@ -54,7 +56,7 @@ The live `word_count` assertions stay in the runtime agent's slice 2 check.
 
 Starts from the contract branch, in parallel with rules and runtime phase A.
 
-Owns `src/static-profile.ts` and `src/report.ts`. Pure functions from a run directory to `static_profile.json` and `report.md`. Its check uses a synthetic run directory and asserts section headers plus a byte-identical rebuild.
+Owns `src/engine/static-profile.ts` and `src/engine/report.ts`. Pure functions from a run directory to `static_profile.json` and `report.md`. Its check uses a synthetic run directory and asserts section headers plus a byte-identical rebuild.
 
 `report.ts` reads `judgments.json` when that file exists and prints `judge not run` when it does not. The judge agent never edits `report.ts`.
 
@@ -76,7 +78,7 @@ Owns `targets/server-filesystem.toml`, that target's scenario, and `checks/` for
 
 Starts once `findings.json` has been produced by a real run and `report.ts` already renders a missing judgment. Parallel with the two target agents, because those agents do not edit `src/`.
 
-Owns `src/judge.ts` and `checks/` for build step 6. Writes `judgments.json`. Skips cleanly when `ANTHROPIC_API_KEY` is absent.
+Owns `src/engine/judge.ts` and `checks/` for build step 6. Writes `judgments.json`. Skips cleanly when `ANTHROPIC_API_KEY` is absent.
 
 ## Schedule
 

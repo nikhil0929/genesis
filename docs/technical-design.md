@@ -677,10 +677,10 @@ The repository has this layout:
 
 - `package.json` declares the `mcpdet` command, and `tsc` compiles `src/`, `checks/`, and `fixtures/` into `dist/`.
 - `src/model.ts` holds the data shape, every variant in one file.
-- `src/cli.ts` parses arguments and sequences the components.
-- `src/sandbox.ts`, `src/static-profile.ts`, `src/attribution.ts`, `src/rules.ts`, `src/judge.ts`, and `src/report.ts` hold one component each. They run on the host.
-- `src/driver.ts` holds the driver. It imports only Node built-in modules, because the sandbox copies its compiled `dist/driver.js` into every target image and it runs there.
-- `src/sensors/` holds the `strace` invocation and the parser.
+- `src/app/cli.ts` parses arguments and sequences the components.
+- `src/engine/sandbox.ts`, `src/engine/static-profile.ts`, `src/engine/attribution.ts`, `src/engine/rules.ts`, `src/engine/judge.ts`, and `src/engine/report.ts` hold one component each. They run on the host.
+- `src/engine/driver.ts` holds the driver. It imports only Node built-in modules, because the sandbox copies its compiled `dist/src/engine/driver.js` into every target image and it runs there.
+- `src/engine/sensors/` holds the `strace` invocation and the parser.
 - `proxy/mcpdet_addon.py` holds the `mitmproxy` addon.
 - `targets/` holds one TOML file per target.
 - `fixtures/detfix/` holds the fixture server, in TypeScript.
