@@ -185,7 +185,7 @@ const scenarioEntrySchema = z.strictObject({
 });
 export type ScenarioEntry = Out<typeof scenarioEntrySchema>;
 
-const targetSchema = z.strictObject({
+export const targetSchema = z.strictObject({
   name: z.string().regex(/^[a-z0-9][a-z0-9._-]*$/),
   source: targetSourceSchema,
   base_image: z.string().min(1),
@@ -1107,6 +1107,8 @@ export type UnmatchedEvent = Out<typeof unmatchedEventSchema>;
 // --- Run --------------------------------------------------------------------
 
 export const CLOCK_TOLERANCE_US = 5_000;
+
+export const runIdSchema = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 
 const runTargetSchema = z.strictObject({
   name: z.string().min(1),
