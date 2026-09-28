@@ -2,7 +2,6 @@ import type { Judgment } from "../model.js";
 
 export type Verdict = "pass" | "fail" | "incomplete";
 
-/** `null` means the judge did not run. A fail outranks an unclear opinion. */
 export function rollupVerdict(judgments: readonly Judgment[] | null): Verdict {
   if (judgments === null) return "incomplete";
   let unclear = false;
