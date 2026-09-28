@@ -1,6 +1,6 @@
 ## Project memory
 
-- `README.md` — Public summary of mcpdet: what it does, how a run works, what v1 includes, and the planned commands. The status line still says design stage.
+- `README.md` — Short GitHub page: how to run a target, how a run works, and later ideas. The long design is in `docs/technical-design.md`.
 - `notes.md` — Live checklist. Open items and finished items, with links to the design docs and GitHub.
 - `archived.md` — Checklist items moved out of `notes.md` after they were done.
 - `docs/technical-design.md` — Architecture plan. Every v1 choice is marked as a decision, with the reason, the data shape, the pipeline, and the report format.
