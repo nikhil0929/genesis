@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -48,3 +48,12 @@ try {
 } finally {
   rmSync(binDir, { recursive: true, force: true });
 }
+
+const cliUrl = pathToFileURL(join(root, "dist", "src", "app", "cli.js")).href;
+const imported = spawnSync(
+  process.execPath,
+  ["--input-type=module", "-e", `await import(${JSON.stringify(cliUrl)});`, "not-a-path"],
+  { cwd: root, encoding: "utf8" },
+);
+assert.equal(imported.status, 0, imported.stderr);
+assert.equal(imported.stderr, "");

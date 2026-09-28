@@ -59,7 +59,7 @@ function fail(error: unknown): void {
 }
 
 const entry = process.argv[1];
-if (entry !== undefined && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
+if (entry !== undefined && existsSync(entry) && import.meta.url === pathToFileURL(realpathSync(entry)).href) {
   if (existsSync(".env")) process.loadEnvFile(".env");
   let command: Command;
   try {
