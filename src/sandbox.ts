@@ -31,6 +31,8 @@ import {
 } from "./model.js";
 import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
 import { sealSourcePath, writeHostSeal } from "./host-seal.js";
+import { rawPath } from "./run-dir.js";
+import { pruneUnscanned } from "./static-profile.js";
 
 export type RunEnvelope = {
   readonly runId: string;
@@ -42,8 +44,6 @@ export type RunEnvelope = {
 
 export type TracedRun = {
   readonly runDir: string;
-  readonly transcriptPath: string;
-  readonly bundlesPath: string;
   readonly envelope: RunEnvelope;
 };
 
@@ -227,7 +227,7 @@ function sealCanaries(runDir: string): readonly Canary[] {
       value: randomBytes(16).toString("hex"),
     });
   }
-  const path = join(runDir, "canaries.json");
+  const path = rawPath(runDir, "canaries.json");
   const text = `${JSON.stringify(canaries)}\n`;
   writeFileSync(path, text, { mode: 0o644 });
   chmodSync(path, 0o644);
@@ -593,7 +593,7 @@ ENTRYPOINT ["node", "/opt/mcpdet/driver.js", "/plan.json"]
 `;
 }
 
-function writePlan(runDir: string, target: Target, canaries: readonly Canary[], proxy: AllowProxy | null): string {
+function writePlan(context: string, target: Target, canaries: readonly Canary[], proxy: AllowProxy | null): string {
   const plan = {
     server_command: target.command,
     server_env: serverEnv(target, canaries, proxy),
@@ -604,7 +604,7 @@ function writePlan(runDir: string, target: Target, canaries: readonly Canary[], 
     settle_ms: SETTLE_MS,
     shutdown_wait_ms: SHUTDOWN_WAIT_MS,
   };
-  const planPath = join(runDir, "plan.json");
+  const planPath = join(context, "plan.json");
   const planText = JSON.stringify(plan);
   parsePlan(planText, planPath);
   writeFileSync(planPath, planText);
@@ -673,10 +673,10 @@ async function runAndCopy(container: string, runDir: string): Promise<void> {
   } catch (error) {
     runError = error instanceof Error ? error : new Error(String(error));
   }
-  mkdirSync(join(runDir, "trace"), { recursive: true });
-  await docker(["cp", `${container}:/trace/.`, join(runDir, "trace")], 60_000);
-  await docker(["cp", `${container}:/transcript.jsonl`, join(runDir, "transcript.jsonl")], 30_000);
-  await docker(["cp", `${container}:/stderr.log`, join(runDir, "stderr.log")], 30_000);
+  mkdirSync(rawPath(runDir, "trace"), { recursive: true });
+  await docker(["cp", `${container}:/trace/.`, rawPath(runDir, "trace")], 60_000);
+  await docker(["cp", `${container}:/transcript.jsonl`, rawPath(runDir, "transcript.jsonl")], 30_000);
+  await docker(["cp", `${container}:/stderr.log`, rawPath(runDir, "stderr.log")], 30_000);
   if (runError !== null) throw runError;
 }
 
@@ -744,7 +744,7 @@ async function startProxy(runId: string, ca: ProxyCa): Promise<{ readonly intern
 
 async function sealFlows(runDir: string, proxyContainer: string): Promise<readonly ProxyFlow[]> {
   await docker(["stop", "-t", "10", proxyContainer], 30_000).catch(() => undefined);
-  const destDir = join(runDir, "proxy");
+  const destDir = rawPath(runDir, "proxy");
   mkdirSync(destDir, { recursive: true });
   const dest = join(destDir, "flows.jsonl");
   await docker(["cp", `${proxyContainer}:${PROXY_LOG}`, dest], 30_000);
@@ -767,12 +767,10 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
   const driverJs = fileURLToPath(new URL("./driver.js", import.meta.url));
   if (!existsSync(driverJs)) throw new Error(`compiled driver is missing: ${driverJs}`);
 
-  mkdirSync(runDir, { recursive: true });
+  mkdirSync(rawPath(runDir), { recursive: true });
   const ca = ensureProxyCa();
   const canaries = sealCanaries(runDir);
   const staging = stageDecoys(canaries);
-  const resolvPath = join(runDir, "resolv.conf");
-  writeFileSync(resolvPath, RESOLVER_TEXT);
 
   const context = mkdtempSync(join(tmpdir(), "mcpdet-"));
   const image = `mcpdet-${runId}`;
@@ -788,18 +786,22 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
     const iidPath = join(context, "image-id");
     await docker(["build", "--iidfile", iidPath, "-t", image, context], BUILD_TIMEOUT_MS);
     const imageId = readFileSync(iidPath, "utf8").trim();
-    mkdirSync(join(runDir, "source"), { recursive: true });
+    const resolvPath = join(context, "resolv.conf");
+    writeFileSync(resolvPath, RESOLVER_TEXT);
+    const sourceDir = rawPath(runDir, "source");
+    mkdirSync(sourceDir, { recursive: true });
     await docker(["create", "--name", sourceContainer, image], 60_000);
     try {
-      await docker(["cp", `${sourceContainer}:${target.source_path}/.`, join(runDir, "source")], 60_000);
+      await docker(["cp", `${sourceContainer}:${target.source_path}/.`, sourceDir], 60_000);
     } finally {
       await removeContainer(sourceContainer);
     }
+    pruneUnscanned(sourceDir);
 
     let network: RunNetwork;
     switch (target.network) {
       case "block": {
-        const planPath = writePlan(runDir, target, canaries, null);
+        const planPath = writePlan(context, target, canaries, null);
         await createTarget(image, container, resolvPath, { kind: "block" });
         await installInto(container, planPath, staging, canaries);
         await runAndCopy(container, runDir);
@@ -809,7 +811,7 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
       case "allow": {
         allowNetwork = internalNetworkName(runId);
         const started = await startProxy(runId, ca);
-        const planPath = writePlan(runDir, target, canaries, started.proxy);
+        const planPath = writePlan(context, target, canaries, started.proxy);
         await createTarget(image, container, resolvPath, { kind: "allow", internalName: started.internalName });
         await installInto(container, planPath, staging, canaries);
         await runAndCopy(container, runDir);
@@ -824,8 +826,6 @@ export async function traceTarget(target: Target): Promise<TracedRun> {
     writeHostSeal(runDir, { image_id: imageId, source_path: sealSourcePath(target.source) });
     return {
       runDir,
-      transcriptPath: join(runDir, "transcript.jsonl"),
-      bundlesPath: join(runDir, "bundles.json"),
       envelope: {
         runId,
         target: {

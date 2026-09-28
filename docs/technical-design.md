@@ -257,16 +257,16 @@ Eight components each have one job. The CLI only sequences them.
 
 | Component | Job | Reads | Writes |
 |---|---|---|---|
-| Sandbox | Give the server a disposable, decoyed Linux environment whose only way out is a logging proxy, or no way out in block mode, and tear it down. | The target file. | The Docker image, `source/` (the installed package copied out of the image), `canaries.json`, `trace/` (copied out after the run), and `proxy/flows.jsonl` in allow mode. |
-| Driver | Act as the MCP host from inside the container. Start the tracer, send scripted messages one at a time, and timestamp every line in both directions. | `plan.json` (the scenario, copied into the container) and the server's stdio. | `transcript.jsonl` and `stderr.log` in `/trace`, copied out with the trace. |
-| Sensors | Capture the syscall trace of the server and all its descendants, then parse it into typed events and a process tree, and join each proxy flow to the socket that sent it. | The running container (capture), `trace/`, and `proxy/flows.jsonl` (parse). | `trace/` during the run, `events.jsonl` and `processes.json` after. |
-| Static profile | Describe what the package claims and appears to do, without running it. | `source/`, the package manifest, and the advertised tools from `transcript.jsonl`. | `static_profile.json`. |
-| Attribution | Assign every event to exactly one bundle or to the unmatched bucket, with a link or a reason. | `events.jsonl`, `processes.json`, and `transcript.jsonl`. | `bundles.json`. |
-| Side-effect rules | Name side effects with a small fixed rule set, and compare each against the tool's interface. | `bundles.json`, `static_profile.json`, and `canaries.json`. | `findings.json`. |
-| Judge | Give an LLM opinion on whether each tool call matches its claims. | `bundles.json`, `findings.json`, and `static_profile.json`. | `judgments.json`. |
+| Sandbox | Give the server a disposable, decoyed Linux environment whose only way out is a logging proxy, or no way out in block mode, and tear it down. | The target file. | The Docker image, `raw/source/` (the installed package copied out of the image, without dependency folders), `raw/canaries.json`, `raw/trace/` (copied out after the run), and `raw/proxy/flows.jsonl` in allow mode. |
+| Driver | Act as the MCP host from inside the container. Start the tracer, send scripted messages one at a time, and timestamp every line in both directions. | `plan.json` (the scenario, written to a temporary folder and copied into the container) and the server's stdio. | `transcript.jsonl` and `stderr.log`, copied out with the trace into `raw/`. |
+| Sensors | Capture the syscall trace of the server and all its descendants, then parse it into typed events and a process tree, and join each proxy flow to the socket that sent it. | The running container (capture), `raw/trace/`, and `raw/proxy/flows.jsonl` (parse). | `trace/` during the run. After it, typed events and a process tree in memory, handed to attribution. |
+| Static profile | Describe what the package claims and appears to do, without running it. | `raw/source/`, the package manifest, and the advertised tools from `raw/transcript.jsonl`. | A profile in memory, shown in `report.md`. |
+| Attribution | Assign every event to exactly one bundle or to the unmatched bucket, with a link or a reason. | The sensor events and process tree, and `raw/transcript.jsonl`. | `bundles.json`. |
+| Side-effect rules | Name side effects with a small fixed rule set, and compare each against the tool's interface. | `bundles.json`, the static profile, and the canaries. | `findings.json`. |
+| Judge | Give an LLM opinion on whether each tool call matches its claims. | `bundles.json`, `findings.json`, and the static profile. | `judgments.json`. |
 | Report | Render one Markdown document for the analyst. | Every file above. | `report.md`. |
 
-**Decision.** Raw artifacts are the source of truth, and everything after them is a pure function of those files [decision]. `trace/`, `transcript.jsonl`, `stderr.log`, `source/`, and `canaries.json` are raw. Everything else can be rebuilt without running the server again, which makes attribution changes testable against a fixed trace [inferred].
+**Decision.** Raw artifacts are the source of truth, and everything after them is a pure function of those files [decision]. Raw files live under `raw/`. Everything else can be rebuilt without running the server again, which makes attribution changes testable against a fixed trace [inferred].
 
 **Decision.** The driver runs inside the container as root, and it starts `strace`, which starts the server as `detonee` [decision]. The driver and the tracer then read the same kernel clock on any host, including a Mac, where Docker Desktop runs containers in a Linux VM with its own clock [inferred]. The driver is not traced, because `strace` traces only the command it starts. The server cannot read `/trace`, which is root-only, and an unprivileged user cannot signal or ptrace a root process [inferred].
 
@@ -296,17 +296,17 @@ The target file is TOML. It names the target, its pinned version, the ecosystem 
 
 1. The CLI parses the target file into a typed target. A bad field stops the run with a message before anything starts.
 2. The sandbox builds the target image with the network on. The build installs `strace` and the pinned package, copies in the `node` binary and the compiled driver, adds the `mcpdet` proxy CA certificate to the system trust store, runs setup commands, and creates the user `detonee`. The image matches the host's CPU architecture, so it is arm64 on an Apple Silicon Mac. The build is not traced.
-3. The sandbox copies the package source directory out of the image into `source/`.
-4. The sandbox generates fresh canary values and a decoy home directory, and writes `canaries.json`.
+3. The sandbox copies the package source directory out of the image into `raw/source/`, then deletes the folders the static profile never scans, such as `node_modules` and `site-packages`.
+4. The sandbox generates fresh canary values and a decoy home directory, and writes `raw/canaries.json`.
 5. In allow mode, the sandbox creates an internal Docker network for this run and starts the proxy container on it. It then creates the target container with `docker create` on that internal network, with the proxy variables set. In block mode, it creates the target container with the network set to none. Both modes add a read-only bind mount of a resolver file that points at 127.0.0.1, the `SYS_PTRACE` capability, and the driver as the entry command. It copies the decoy home and `plan.json` into the container with `docker cp`.
 6. The sandbox starts the container with `docker start` and waits for it to exit, with an overall deadline. The rest of the run happens inside the container until step 11.
 7. The driver starts `strace`, which starts the server. The driver sends `initialize`, reads the reply, sends `notifications/initialized`, and pages through `tools/list`, then `resources/list` and `prompts/list` when advertised. It timestamps every line.
 8. The driver builds the call plan, with scenario calls first and schema probes after.
 9. For each planned call, the driver sends `tools/call`, waits up to 30 seconds for the reply, records it, and waits the one-second settle gap. A timeout or a server exit ends the sequence.
 10. The driver closes the server's stdin and records the time. It waits up to five seconds for `strace` to exit, flushes the transcript, and exits. The driver is process 1 in the container, so its exit makes the kernel kill every process left ([pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html)). If the overall deadline passes first, the sandbox runs `docker kill`.
-11. The sandbox copies `/trace` out of the container into `trace/`, `transcript.jsonl`, and `stderr.log`, and removes the container. In allow mode, it copies the flow log out of the proxy container into `proxy/flows.jsonl`, then removes the proxy container and the internal network.
-12. Sensors parse `trace/` into `events.jsonl` and `processes.json`, and join each proxy flow to its socket.
-13. The static profile scans `source/` and the advertised tools and writes `static_profile.json`.
+11. The sandbox copies `/trace` out of the container into `raw/trace/`, `raw/transcript.jsonl`, and `raw/stderr.log`, and removes the container. In allow mode, it copies the flow log out of the proxy container into `raw/proxy/flows.jsonl`, then removes the proxy container and the internal network.
+12. Sensors parse `raw/trace/` into events and a process tree, and join each proxy flow to its socket.
+13. The static profile scans `raw/source/` and the advertised tools.
 14. Attribution builds windows from the transcript, assigns owners, places every event, runs the clock check, and writes `bundles.json`.
 15. The side-effect rules write `findings.json`.
 16. If `ANTHROPIC_API_KEY` is set and no saved judgments exist, the judge writes `judgments.json`.
@@ -604,23 +604,24 @@ The CLI has two commands:
 
 **Decision.** The analyst-facing report is Markdown [decision]. It reads in a terminal, renders in any code host, and needs no server. `bundles.json` carries the same content for machines and for a later judging step [inferred].
 
+**Decision.** The top of the run directory holds only what a person or a program reads, and the raw capture sits under `raw/` [decision]. Sensor events, the process tree, and the static profile are not written, because `bundles.json` already holds every event and process, and `report.md` shows the profile [inferred]. The container's `plan.json` and resolver file live in a temporary folder that is deleted after the run.
+
 The run directory contains:
 
 | File | Kind |
 |---|---|
-| `target.toml` | Raw, a copy of the input. |
-| `source/` | Raw, the package as installed in the image. |
-| `canaries.json` | Raw. |
-| `trace/` | Raw, the per-id `strace` files. |
-| `transcript.jsonl` | Raw. |
-| `stderr.log` | Raw, server stderr lines with the driver's timestamps. |
-| `proxy/flows.jsonl` | Raw, the proxy's flow log. Present in allow mode only. |
-| `events.jsonl` and `processes.json` | Derived by sensors. |
-| `static_profile.json` | Derived. |
-| `bundles.json` | Derived, the attributed run. |
-| `findings.json` | Derived. |
-| `judgments.json` | Saved LLM output. Reused on rebuild unless `--rejudge` is passed. |
 | `report.md` | Derived, the analyst's document. |
+| `findings.json` | Derived, the rule hits. |
+| `bundles.json` | Derived, the attributed run with every event and process. |
+| `judgments.json` | Saved LLM output. Present when the judge ran. Reused on rebuild unless `--rejudge` is passed. |
+| `raw/target.toml` | Raw, a copy of the input. |
+| `raw/host.json` | Raw, the image id and source path. |
+| `raw/source/` | Raw, the package as installed in the image, without dependency folders. |
+| `raw/canaries.json` | Raw. |
+| `raw/trace/` | Raw, the per-id `strace` files. |
+| `raw/transcript.jsonl` | Raw. |
+| `raw/stderr.log` | Raw, server stderr lines with the driver's timestamps. |
+| `raw/proxy/flows.jsonl` | Raw, the proxy's flow log. Present in allow mode only. |
 
 `report.md` has these sections in order:
 

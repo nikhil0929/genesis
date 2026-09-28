@@ -1,9 +1,10 @@
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { z } from "zod";
 
 import { BoundaryError, parseCanaries, parseFlows, parseTarget } from "./model.js";
 import type { Target, TargetSource } from "./model.js";
+import { rawPath } from "./run-dir.js";
 import type { RunEnvelope } from "./sandbox.js";
 
 const hostSealSchema = z.strictObject({
@@ -53,13 +54,13 @@ function envelopeSource(target: Target, seal: HostSeal): TargetSource {
 
 export function writeHostSeal(runDir: string, seal: HostSeal): void {
   const text = JSON.stringify({ image_id: seal.image_id, source_path: seal.source_path });
-  const temporary = join(runDir, `.host.json.${process.pid}.tmp`);
+  const temporary = rawPath(runDir, `.host.json.${process.pid}.tmp`);
   writeFileSync(temporary, text);
-  renameSync(temporary, join(runDir, "host.json"));
+  renameSync(temporary, rawPath(runDir, "host.json"));
 }
 
 function readHostSeal(runDir: string): HostSeal {
-  const source = join(runDir, "host.json");
+  const source = rawPath(runDir, "host.json");
   const text = readFileSync(source, "utf8");
   let value: unknown;
   try {
@@ -76,14 +77,14 @@ function readHostSeal(runDir: string): HostSeal {
 export function readEnvelope(runDir: string): RunEnvelope {
   const directory = resolve(runDir);
   const seal = readHostSeal(directory);
-  const targetPath = join(directory, "target.toml");
+  const targetPath = rawPath(directory, "target.toml");
   const target = parseTarget(readFileSync(targetPath, "utf8"), targetPath);
   const source = envelopeSource(target, seal);
-  const canariesPath = join(directory, "canaries.json");
+  const canariesPath = rawPath(directory, "canaries.json");
   let network: RunEnvelope["network"];
   switch (target.network) {
     case "allow": {
-      const flowsPath = join(directory, "proxy", "flows.jsonl");
+      const flowsPath = rawPath(directory, "proxy", "flows.jsonl");
       network = { kind: "allow", flows: parseFlows(readFileSync(flowsPath, "utf8"), flowsPath) };
       break;
     }
