@@ -928,7 +928,7 @@ function runHeader(run: Run, judgments: readonly Judgment[] | null): string {
     lines.push(`Warning: max_violation_us ${clock.max_violation_us} exceeds ${CLOCK_TOLERANCE_US}`);
   }
   if (judgments !== null) {
-    lines.push("This run sent tool descriptions and source snippets to OpenRouter.");
+    lines.push("This run sent tool descriptions, source snippets, and each event's parsed body to Anthropic.");
   }
   return lines.join("\n");
 }
