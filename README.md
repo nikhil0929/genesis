@@ -22,7 +22,7 @@ Classic malware sandboxes solve a similar problem for files. They run the file i
 
 For each tool call, the report asks one question. Does what this call did match what the tool claims?
 
-It never answers "is this malicious?" There is no score and no verdict. A verdict hides the evidence, and the person reading the report needs the evidence. The report puts what the call did right next to what the tool said it would do, and the reader decides.
+It never answers "is this malicious?" There is no score. The report opens with a glance that says whether the calls matched their descriptions. Each call then shows the reply, the side effects, and the judge's opinion. The full event list stays in `bundles.json`.
 
 An LLM judge then adds a second opinion per call, either "matches", "does not match", or "unclear", citing the exact events it relied on. The judge only reads finished evidence. It cannot add, remove, or change what the trace shows.
 
@@ -79,22 +79,29 @@ A process that keeps running after the tool replies stays tied to the call that 
 
 ## What a report looks like
 
-The excerpt below is made up. It shows the shape of one tool-call section.
+The excerpt below is made up. It shows the opening glance and one tool call.
 
-> **Call 4 · `word_count`**
+> # Verdict
 >
-> The tool claims: "Count the words in the given text."
+> Does not match. 1 of 5 calls did something the description does not cover.
 >
-> | Rule | What happened | Link | Does the tool mention it? |
+> | Call | Tool | Verdict | What happened |
 > |---|---|---|---|
-> | Credential access | Opened `~/.aws/credentials` (a planted decoy) | Weak | No |
-> | Network attempt | DNS lookup of `akia7q2k…exfil.example`, then a blocked direct connect to 203.0.113.7 port 443 | Weak | No |
-> | Network attempt | `POST https://exfil.example/collect` through the proxy, request and response logged | Weak | No |
-> | Canary exposed | The decoy AWS key appeared inside that DNS name and in the POST body | Weak | No |
+> | 3 | word_count | does not match | Read `~/.aws/credentials`. Network `akia7q2k….exfil.example`. Network `POST https://exfil.example/collect`. +1 more |
 >
-> **LLM opinion, not evidence.** Does not match. The tool claims only to count words, but events e212 and e219 read a credential file and send its key out in a DNS lookup.
+> # Tool call 3: word_count
+>
+> does not match. Count the words in the given text.
+>
+> Reply: 1
+>
+> POST `https://exfil.example/collect` status 200. Canary `aws_secret_access_key`.
+>
+> | What happened | Rule | Link | After reply | Source |
+> |---|---|---|---|---|
+> | `~/.aws/credentials` | credential_access | weak | no | none |
 
-The reader does not need a verdict to see that this tool does something its description never mentions.
+The glance is a match check. It is not a malice score.
 
 ## Components
 
@@ -138,7 +145,7 @@ In v1:
 Not in v1:
 
 - Skills, and remote MCP servers reached over HTTP.
-- Malware scores, verdicts, and agent evals.
+- Malware scores and agent evals. The opening glance checks descriptions against behavior. It does not score malice.
 - LLM-chosen tool inputs. Fixed inputs make two runs of the same server comparable.
 - Windows hosts, and servers that only run on macOS or Windows.
 - Tracing the package install itself. The report flags install scripts so the reader knows they ran unobserved.
