@@ -1,5 +1,20 @@
 # mcpdet
 
+## Quickstart
+
+Fill in a `.env` file with the variables listed under [What you have to configure](#what-you-have-to-configure), then run:
+
+```bash
+npm install
+npx drizzle-kit migrate   # create the runs table
+node dist/src/app/cli.js serve
+```
+
+The server listens on `127.0.0.1:8787`. Both endpoints need an `Authorization: Bearer $MCPDET_API_TOKEN` header.
+
+- `POST /runs` takes a target as JSON (the same fields as a file in `targets/`) and starts a run. It returns `{ "id", "status": "running" }`.
+- `GET /runs/:id` returns the run's status, its verdict, and the judge results once the run is done.
+
 ## The architecture
 
 It's the same detonator engine as `main`, with a small REST server in front and two places to keep results:
