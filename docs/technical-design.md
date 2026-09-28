@@ -42,7 +42,7 @@ Each row is argued in the section named in the last column.
 | Credentials | Decoy credential files and decoy environment variables with fresh canary values per run. | Credentials and environment |
 | Driver | A hand-written JSON-RPC client over stdio that sends one request at a time. It runs inside the container, as the parent of the tracer. | Components |
 | Tool inputs | A scenario file per target. Each advertised tool the scenario skips gets one call with inputs derived from its schema. | Components |
-| Judgment | The deterministic pipeline writes no verdict. It places each named side effect beside the tool's claims. Build step 6 adds an LLM judge that gives an opinion per tool call, cites event ids, and never scores maliciousness. | Judge |
+| Judgment | The deterministic pipeline writes no malice score. It places each named side effect beside the tool's claims. The report's opening glance counts calls that do not match. An LLM judge gives an opinion per tool call, cites event ids, and never scores maliciousness. | Judge |
 | Interface | A CLI with two commands, `mcpdet detonate` and `mcpdet report`, that writes a run directory with `report.md` and `bundles.json`. | Report and interface |
 | Language | TypeScript on Node 24 LTS, for `mcpdet`, its checks, `detfix`, and the in-container driver. The host needs Node on macOS or Linux. | Components |
 | First fixture | `detfix`, a small purpose-built stdio server in the repo. | First targets |
@@ -530,7 +530,7 @@ Each finding on a tool call carries a `claim_check` with two mechanical facts:
 - `interface_mentions` records whether any keyword for that rule appears in the tool's name, description, or schema property names.
 - `annotation_conflict` records whether the finding contradicts one of the tool's annotations. The MCP spec defines annotations such as `readOnlyHint` and `openWorldHint` ([MCP tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)), and `server-filesystem` sets them on every tool ([server-filesystem README](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem)).
 
-**Decision.** The deterministic pipeline writes no verdict and no match score [decision]. The analyst answers "does this match what the tool claims?" by reading the finding beside the description, and the two mechanical facts show where the interface is silent or contradicted [inferred]. Annotations are the only structured claims an MCP tool makes, so a conflict with one is a fact, not a judgment [inferred]. The judge in the next section adds an opinion on top, in a separate file.
+**Decision.** The deterministic pipeline writes no malice score [decision]. The analyst answers "does this match what the tool claims?" by reading the finding beside the description, and the two mechanical facts show where the interface is silent or contradicted [inferred]. Annotations are the only structured claims an MCP tool makes, so a conflict with one is a fact, not a judgment [inferred]. The judge in the next section adds an opinion on top, in a separate file. `report.md` opens with a match glance computed from those opinions and findings. The glance is not a score.
 
 The keyword lists, the sensitive path list, and the code extensions live in one data table in the rules module. Changing a list changes no logic.
 
@@ -560,7 +560,7 @@ The judge must return one JSON object with these fields:
 |---|---|
 | `opinion` | One of `matches`, `does_not_match`, or `unclear`. |
 | `mismatches` | A list of mismatches. Each names the event ids it relies on and explains in one or two sentences why the tool's claims do not cover them. |
-| `summary` | One or two sentences for the report's summary table. |
+| `summary` | One or two sentences for the tool-call section. |
 
 **Decision.** The judge validates every answer before saving it [decision]. An answer that is not valid JSON, uses an unknown opinion, or cites an event id that is not in that bundle is retried once. If it fails again, it is saved as `invalid` with the raw text, and the report shows it that way. An opinion with an invented citation would look like evidence without being evidence [inferred].
 
@@ -624,14 +624,12 @@ The run directory contains:
 
 `report.md` has these sections in order:
 
-1. The run header gives the target, version, source (registry package or local folder), image id, command, network mode, duration, and the clock check result. In allow mode it also says that the container could contact real internet hosts, and it gives the path of the proxy log.
-2. A summary table has one row per bundle. The columns are outcome, finding counts per rule, strong and weak event counts, processes spawned, events after the reply, and the judge's opinion for tool calls.
-3. The static profile section gives the package, dependencies, install-script flag, every advertised tool with its escaped description, schema, and annotations, and the API hints.
-4. The startup section gives findings, the process tree, network attempts, credential access, and file activity.
-5. One section per tool call opens with the question "Does this match what the tool claims?" and then shows the tool's description, schema, annotations, and source sites. It follows with the arguments and their source, and the outcome. The outcome shows the tool's reply exactly as the driver read it from stdout, set beside the tool's claim. A network table lists each joined proxy flow with its method, URL, status, body sizes, and canary hits. A findings table comes next. The table columns are rule, subject, acting process, link strength, after reply, interface mentions, annotation conflict, and source hints. The process subtree and file activity come next. The judge's opinion comes last, in a block labeled "LLM opinion, not evidence".
-6. The shutdown section gives the same parts as startup.
-7. The unmatched section lists every unmatched event with its reason and its "after" hint.
-8. The limits section lists what this run could not see.
+1. The verdict opens with a match glance. It counts calls whose judge opinion is `does_not_match`, or, when the judge did not run, calls with a side effect the description does not mention. A table has one row per tool call. The columns are call number, tool, verdict, and a short list of what happened. Startup, shutdown, and unmatched findings follow when they exist. The same section names the target, the network mode, and the clock check. In allow mode it says the container could contact real internet hosts and gives the proxy log path. Event detail stays in `bundles.json`.
+2. One section per tool call gives the verdict, the claim, the arguments, and the reply text. Joined proxy flows list method, URL, status, and canary hits. A findings table follows. The columns are what happened, rule, link, after reply, and source. The judge's opinion comes last, in a block labeled "LLM opinion, not evidence".
+3. The startup and shutdown sections list findings only.
+4. The unmatched section lists findings and the events behind them. Routine reads stay in `bundles.json`.
+5. The package section gives the package, dependencies, install-script flag, description flags, and API hints.
+6. The limits section lists what this run could not see.
 
 **Decision.** Group routine file reads into counts per directory in `report.md`, and keep every event in `bundles.json` [decision]. Interpreter startup opens thousands of library files, and a count per directory keeps the quiet startup visible without burying the findings [inferred]. The grouping never applies to sensitive paths, writes, or anything a rule named.
 

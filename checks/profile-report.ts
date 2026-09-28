@@ -418,14 +418,13 @@ function assertProfile(dir: string): void {
 
 function assertReport(report: string): void {
   const headers = [
-    "# Run",
-    "# Summary",
-    "# Static profile",
-    "# Startup",
+    "# Verdict",
     "# Tool call 0: echo",
     "# Tool call 1: missing_tool",
+    "# Startup",
     "# Shutdown",
     "# Unmatched",
+    "# Package",
     "# Limits",
   ];
   let cursor = 0;
@@ -434,26 +433,29 @@ function assertReport(report: string): void {
     assert.ok(found >= cursor, header);
     cursor = found + header.length;
   }
+  assert.equal(report.startsWith("# Verdict\n"), true);
+  assert.match(report, /Judge not run\. 1 of 2 calls did something the description does not mention\./);
   assert.equal([...report.matchAll(/^# Tool call /gm)].length, 2);
   assert.match(report, /Clock check: passed/);
   assert.match(report, /The container could contact real internet hosts/);
   assert.match(report, /proxy\/flows\.jsonl/);
   assert.match(report, /ran at build time, not observed/);
-  assert.match(report, /2 reads in \/usr\/lib\/node/);
-  assert.match(report, /e1 open read \/work\/detfix\.conf/);
+  assert.equal(report.includes("/usr/lib/node/e13.js"), false);
+  assert.equal(report.includes(wordCountDescription), false);
+  assert.match(report, /ignore previous/);
+  assert.match(report, /\/work\/detfix\.conf/);
   assert.match(report, /after call 1/);
   assert.doesNotMatch(report, /after call 2/);
 
   for (const header of ["# Tool call 0: echo", "# Tool call 1: missing_tool"]) {
     const section = sectionAfter(report, header);
-    assert.match(section, /Does this match what the tool claims\?/);
     assert.match(section, /LLM opinion, not evidence/);
     assert.match(section, /^judge not run$/m);
   }
   const echoSection = sectionAfter(report, "# Tool call 0: echo");
   assert.match(echoSection, /https:\/\/exfil\.example\/collect/);
   assert.match(echoSection, /aws_access_key_id/);
-  assert.match(echoSection, new RegExp(replyRaw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(echoSection, /Reply: 1/);
   assert.match(echoSection, /\| file_modified \|/);
   assert.match(echoSection, /\| yes \|/);
   assert.match(echoSection, /\| weak \|/);

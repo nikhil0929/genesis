@@ -8,26 +8,19 @@ import {
   clockPassed,
   descriptionTooLong,
   findingStrength,
-  linkStrength,
   outcomeTime,
-  outlivedReply,
-  ownedProcesses,
   parseFindings,
   parseJudgments,
   parseRun,
   parseStaticProfile,
   parseTranscript,
   PREVIEW_LIMIT_BYTES,
-  RULE_NAMES,
-  shutdownEnd,
   toolCallSeq,
 } from "./model.js";
 import type {
   ArgumentSource,
-  AttributedProcess,
   CallDefinition,
   CallId,
-  CallOutcome,
   Event,
   ExitEnd,
   FileAction,
@@ -36,21 +29,15 @@ import type {
   GapPredecessor,
   HttpBody,
   Judgment,
-  Link,
   NetBody,
   Peer,
   ProcessAction,
-  ProcessEnd,
   ProxyFlow,
   Run,
   RunNetwork,
-  ShutdownTrigger,
   StaticProfile,
   TargetSource,
-  ToolAnnotations,
   ToolCallBundle,
-  ToolDefinition,
-  ToolText,
   UnmatchedReason,
   WriteTarget,
 } from "./model.js";
@@ -81,22 +68,6 @@ function tableCell(value: string): string {
 
 function document(parts: readonly string[]): string {
   return `${parts.join("\n\n")}\n`;
-}
-
-function boolText(value: boolean | null): string {
-  if (value === null) return "null";
-  return value ? "true" : "false";
-}
-
-function annotationLines(annotations: ToolAnnotations): string[] {
-  return [
-    "Annotations:",
-    `title: ${annotations.title ?? "null"}`,
-    `read_only_hint: ${boolText(annotations.read_only_hint)}`,
-    `destructive_hint: ${boolText(annotations.destructive_hint)}`,
-    `idempotent_hint: ${boolText(annotations.idempotent_hint)}`,
-    `open_world_hint: ${boolText(annotations.open_world_hint)}`,
-  ];
 }
 
 function sourceText(source: TargetSource): string {
@@ -140,20 +111,6 @@ function describePeer(peer: Peer): string {
   }
 }
 
-function describeEnd(end: ProcessEnd): string {
-  switch (end.kind) {
-    case "exited":
-      return `exited ${end.status} at ${end.t_us}`;
-    case "killed":
-      return `killed ${end.signal} at ${end.t_us}`;
-    case "alive_at_teardown":
-      return "alive_at_teardown";
-    default: {
-      const _exhaustive: never = end;
-      return _exhaustive;
-    }
-  }
-}
 
 function describeExit(end: ExitEnd): string {
   switch (end.kind) {
@@ -291,77 +248,10 @@ function argumentSourceText(source: ArgumentSource): string {
   }
 }
 
-function outcomeLabel(outcome: CallOutcome): string {
-  switch (outcome.kind) {
-    case "reply":
-      return outcome.is_error ? "reply error" : "reply";
-    case "rpc_error":
-      return "rpc_error";
-    case "no_reply":
-      return `no_reply ${outcome.reason}`;
-    default: {
-      const _exhaustive: never = outcome;
-      return _exhaustive;
-    }
-  }
-}
 
-function shutdownLabel(trigger: ShutdownTrigger): string {
-  switch (trigger.kind) {
-    case "stdin_closed":
-      return "stdin_closed";
-    case "server_exited":
-      return "server_exited";
-    default: {
-      const _exhaustive: never = trigger;
-      return _exhaustive;
-    }
-  }
-}
 
 function eventsOf(entries: readonly { readonly event: Event }[]): Event[] {
   return entries.map((entry) => entry.event);
-}
-
-function countStrength(entries: readonly { readonly link: Link }[]): { strong: number; weak: number } {
-  let strong = 0;
-  let weak = 0;
-  for (const entry of entries) {
-    const strength = linkStrength(entry.link);
-    switch (strength) {
-      case "strong":
-        strong += 1;
-        break;
-      case "weak":
-        weak += 1;
-        break;
-      default: {
-        const _exhaustive: never = strength;
-        return _exhaustive;
-      }
-    }
-  }
-  return { strong, weak };
-}
-
-function spawnCount(events: readonly Event[]): number {
-  let count = 0;
-  for (const event of events) {
-    if (event.body.kind === "process" && event.body.action.kind === "spawn") count += 1;
-  }
-  return count;
-}
-
-function countAfterReply(call: ToolCallBundle): number {
-  let count = 0;
-  for (const entry of call.events) {
-    if (afterReply(call, entry)) count += 1;
-  }
-  return count;
-}
-
-function ruleCounts(findings: readonly Finding[]): number[] {
-  return RULE_NAMES.map((rule) => findings.filter((finding) => finding.rule === rule).length);
 }
 
 function startupFindings(findings: readonly Finding[]): Finding[] {
@@ -380,36 +270,6 @@ function callFindings(findings: readonly Finding[], callId: CallId): Finding[] {
   return findings.filter((finding) => finding.kind === "call" && finding.call_id === callId);
 }
 
-function bundleEvents(run: Run, finding: Finding): readonly Event[] {
-  switch (finding.kind) {
-    case "startup":
-      return eventsOf(run.startup.events);
-    case "call": {
-      const call = run.tool_calls.find((item) => item.call_id === finding.call_id);
-      return call === undefined ? [] : eventsOf(call.events);
-    }
-    case "shutdown":
-      return eventsOf(run.shutdown.events);
-    case "unmatched":
-      return run.unmatched.map((entry) => entry.event);
-    default: {
-      const _exhaustive: never = finding;
-      return _exhaustive;
-    }
-  }
-}
-
-function actingProcess(run: Run, finding: Finding): string {
-  const events = new Map(bundleEvents(run, finding).map((event) => [event.event_id, event]));
-  const pids: number[] = [];
-  for (const id of finding.evidence) {
-    const event = events.get(id);
-    if (event === undefined || pids.includes(event.pid)) continue;
-    pids.push(event.pid);
-  }
-  return pids.length === 0 ? "none" : pids.join(", ");
-}
-
 function afterReplyCell(run: Run, finding: Finding): string {
   if (finding.kind !== "call") return "-";
   const call = run.tool_calls.find((item) => item.call_id === finding.call_id);
@@ -423,96 +283,6 @@ function afterReplyCell(run: Run, finding: Finding): string {
 
 function strengthCell(run: Run, finding: Finding): string {
   return findingStrength(run, finding) ?? "none";
-}
-
-function findingsTable(run: Run, findings: readonly Finding[]): string[] {
-  if (findings.length === 0) return ["Findings:", "none"];
-  const rows = findings.map((finding) => [
-    finding.rule,
-    subjectText(finding.subject),
-    actingProcess(run, finding),
-    strengthCell(run, finding),
-    afterReplyCell(run, finding),
-    finding.kind === "call" ? (finding.claim_check.interface_mentions ?? "none") : "-",
-    finding.kind === "call" ? (finding.claim_check.annotation_conflict ?? "none") : "-",
-    finding.source_hints.length === 0
-      ? "none"
-      : finding.source_hints.map((hint) => `${hint.file}:${hint.line}`).join(", "),
-  ]);
-  return [
-    "Findings:",
-    markdownTable(
-      [
-        "rule",
-        "subject",
-        "acting process",
-        "link strength",
-        "after reply",
-        "interface mentions",
-        "annotation conflict",
-        "source hints",
-      ],
-      rows,
-    ),
-  ];
-}
-
-function processLine(process: AttributedProcess, call: ToolCallBundle | null): string {
-  const exec = process.execs[0];
-  const command = exec === undefined ? "no exec" : `${exec.path} ${exec.argv.join(" ")}`;
-  const outlived =
-    call !== null && process.kind === "child" ? ` outlived reply ${outlivedReply(call, process) ? "yes" : "no"}` : "";
-  return `${process.pid} ${process.kind} ${command} ${describeEnd(process.end)}${outlived}`;
-}
-
-function processTree(run: Run, include: (process: AttributedProcess) => boolean, call: ToolCallBundle | null): string[] {
-  const included = Object.values(run.processes).filter(include);
-  const includedPids = new Set(included.map((process) => process.pid));
-  const roots = included
-    .filter((process) => process.kind !== "child" || !includedPids.has(process.parent_pid))
-    .sort((left, right) => left.pid - right.pid);
-  const lines: string[] = [];
-  const walk = (process: AttributedProcess, depth: number): void => {
-    lines.push(`${"  ".repeat(depth)}- ${processLine(process, call)}`);
-    const children = Object.values(run.processes)
-      .filter(
-        (item): item is AttributedProcess & { kind: "child"; parent_pid: number } =>
-          item.kind === "child" && item.parent_pid === process.pid && includedPids.has(item.pid),
-      )
-      .sort((left, right) => left.pid - right.pid);
-    for (const child of children) walk(child, depth + 1);
-  };
-  for (const root of roots) walk(root, 0);
-  return lines.length === 0 ? ["none"] : lines;
-}
-
-function startupProcess(process: AttributedProcess): boolean {
-  switch (process.kind) {
-    case "root":
-      return true;
-    case "child":
-      return process.owner.kind === "server";
-    case "orphan":
-      return false;
-    default: {
-      const _exhaustive: never = process;
-      return _exhaustive;
-    }
-  }
-}
-
-function shutdownProcess(process: AttributedProcess): boolean {
-  switch (process.kind) {
-    case "root":
-    case "orphan":
-      return false;
-    case "child":
-      return process.owner.kind === "shutdown";
-    default: {
-      const _exhaustive: never = process;
-      return _exhaustive;
-    }
-  }
 }
 
 // These paths stay listed. The rules module owns the same set, and this file cannot import it.
@@ -541,107 +311,12 @@ function sensitivePath(path: string): boolean {
   return prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
-function fileActionPaths(action: FileAction): readonly string[] {
-  switch (action.kind) {
-    case "rename":
-    case "link":
-    case "symlink":
-      return [action.path, action.second_path];
-    case "open":
-    case "stat":
-    case "access":
-    case "readlink":
-    case "unlink":
-    case "mkdir":
-    case "rmdir":
-    case "chmod":
-    case "chown":
-    case "truncate":
-    case "utime":
-    case "chdir":
-    case "mknod":
-    case "xattr":
-    case "other":
-      return [action.path];
-    default: {
-      const _exhaustive: never = action;
-      return _exhaustive;
-    }
-  }
-}
-
-function eventPaths(event: Event): readonly string[] {
-  switch (event.body.kind) {
-    case "file":
-      return fileActionPaths(event.body.action);
-    case "data":
-      return event.body.target.kind === "file" ? [event.body.target.path] : [];
-    case "process":
-    case "net":
-    case "other":
-      return [];
-    default: {
-      const _exhaustive: never = event.body;
-      return _exhaustive;
-    }
-  }
-}
-
 function citedIds(findings: readonly Finding[]): Set<string> {
   const ids = new Set<string>();
   for (const finding of findings) {
     for (const id of finding.evidence) ids.add(id);
   }
   return ids;
-}
-
-function routineRead(event: Event, cited: ReadonlySet<string>): boolean {
-  if (cited.has(event.event_id)) return false;
-  if (event.body.kind !== "file" || event.body.action.kind !== "open") return false;
-  const action = event.body.action;
-  return action.access === "read" && !action.created && !sensitivePath(action.path);
-}
-
-function directoryOf(path: string): string {
-  const slash = path.lastIndexOf("/");
-  if (slash <= 0) return "/";
-  return path.slice(0, slash);
-}
-
-function fileActivity(events: readonly Event[], findings: readonly Finding[]): string[] {
-  const cited = citedIds(findings);
-  const listed: string[] = [];
-  const counts = new Map<string, number>();
-  for (const event of events) {
-    if (event.body.kind === "data" && event.body.target.kind === "file") {
-      listed.push(`${event.event_id} ${describeEvent(event)}`);
-      continue;
-    }
-    if (event.body.kind !== "file") continue;
-    if (routineRead(event, cited) && event.body.action.kind === "open") {
-      const directory = directoryOf(event.body.action.path);
-      counts.set(directory, (counts.get(directory) ?? 0) + 1);
-      continue;
-    }
-    listed.push(`${event.event_id} ${describeEvent(event)}`);
-  }
-  const summaries = [...counts.entries()]
-    .sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
-    .map(([directory, count]) => `${count} ${count === 1 ? "read" : "reads"} in ${directory}`);
-  const lines = [...listed, ...summaries];
-  return lines.length === 0 ? ["none"] : lines;
-}
-
-function credentialLines(events: readonly Event[], findings: readonly Finding[]): string[] {
-  const cited = new Set(
-    findings.filter((finding) => finding.rule === "credential_access").flatMap((finding) => [...finding.evidence]),
-  );
-  const lines: string[] = [];
-  for (const event of events) {
-    if (!cited.has(event.event_id) && !eventPaths(event).some((path) => sensitivePath(path))) continue;
-    lines.push(`${event.event_id} ${describeEvent(event)}`);
-  }
-  return lines.length === 0 ? ["none"] : lines;
 }
 
 function bodyText(body: HttpBody): string | null {
@@ -692,18 +367,6 @@ function flowStatus(flow: ProxyFlow): string {
   }
 }
 
-function responseBytes(flow: ProxyFlow): string {
-  switch (flow.result.kind) {
-    case "response":
-      return String(flow.result.response.body.byte_count);
-    case "error":
-      return "-";
-    default: {
-      const _exhaustive: never = flow.result;
-      return _exhaustive;
-    }
-  }
-}
 
 function joinedFlows(run: Run, events: readonly Event[]): ProxyFlow[] {
   if (run.network.kind !== "allow") return [];
@@ -721,27 +384,13 @@ function joinedFlows(run: Run, events: readonly Event[]): ProxyFlow[] {
   return flows;
 }
 
-function networkLines(run: Run, events: readonly Event[]): string[] {
-  const attempts = events.filter((event) => event.body.kind === "net");
-  const lines = ["Network:"];
-  if (attempts.length === 0) lines.push("none");
-  else for (const event of attempts) lines.push(`${event.event_id} ${describeEvent(event)}`);
-  const flows = joinedFlows(run, events);
-  if (flows.length === 0) return lines;
-  lines.push(
-    markdownTable(
-      ["method", "url", "status", "request bytes", "response bytes", "canary hits"],
-      flows.map((flow) => [
-        flow.request.method,
-        flow.request.url,
-        flowStatus(flow),
-        String(flow.request.body.byte_count),
-        responseBytes(flow),
-        canaryHits(run, flow),
-      ]),
-    ),
-  );
-  return lines;
+
+function flowSummaries(run: Run, events: readonly Event[]): string[] {
+  return joinedFlows(run, events).map((flow) => {
+    const hits = canaryHits(run, flow);
+    const canary = hits === "none" ? "" : ` Canary ${hits}.`;
+    return `${flow.request.method} ${flow.request.url} status ${flowStatus(flow)}.${canary}`;
+  });
 }
 
 function judgmentFor(judgments: readonly Judgment[] | null, callId: CallId): Judgment | null | undefined {
@@ -749,17 +398,41 @@ function judgmentFor(judgments: readonly Judgment[] | null, callId: CallId): Jud
   return judgments.find((judgment) => judgment.call_id === callId);
 }
 
-function judgeSummary(judgments: readonly Judgment[] | null, callId: CallId): string {
+
+type Glance = "matches" | "does_not_match" | "unclear" | "invalid" | "judge not run" | "no judgment";
+
+function glanceOf(judgments: readonly Judgment[] | null, callId: CallId): Glance {
   const judgment = judgmentFor(judgments, callId);
   if (judgment === null) return "judge not run";
   if (judgment === undefined) return "no judgment";
   switch (judgment.kind) {
-    case "answer":
-      return judgment.answer.opinion;
     case "invalid":
       return "invalid";
+    case "answer":
+      return judgment.answer.opinion;
     default: {
       const _exhaustive: never = judgment;
+      return _exhaustive;
+    }
+  }
+}
+
+function glanceWords(glance: Glance): string {
+  switch (glance) {
+    case "matches":
+      return "matches";
+    case "does_not_match":
+      return "does not match";
+    case "unclear":
+      return "unclear";
+    case "invalid":
+      return "invalid";
+    case "judge not run":
+      return "judge not run";
+    case "no judgment":
+      return "no judgment";
+    default: {
+      const _exhaustive: never = glance;
       return _exhaustive;
     }
   }
@@ -779,18 +452,13 @@ function judgeLines(call: ToolCallBundle, judgments: readonly Judgment[] | null)
   switch (judgment.kind) {
     case "invalid":
       lines.push("invalid");
-      lines.push(`Model: ${judgment.model}`);
-      lines.push(`Answered at: ${judgment.answered_at_us}`);
-      lines.push(`Error: ${judgment.error}`);
-      lines.push("Raw:");
-      lines.push(judgment.raw_text);
+      lines.push(judgment.error);
       return lines;
     case "answer":
-      lines.push(judgment.answer.opinion);
-      lines.push(judgment.answer.summary);
-      lines.push(`Model: ${judgment.model}`);
-      lines.push(`Answered at: ${judgment.answered_at_us}`);
-      if (judgment.answer.mismatches.length === 0) lines.push("Mismatches: none");
+      lines.push(glanceWords(judgment.answer.opinion));
+      if (judgment.answer.opinion !== "matches" || judgment.answer.mismatches.length > 0) {
+        lines.push(judgment.answer.summary);
+      }
       for (const mismatch of judgment.answer.mismatches) {
         lines.push(`Mismatch ${mismatch.event_ids.join(", ")}: ${mismatch.explanation}`);
       }
@@ -835,26 +503,55 @@ function claimText(definition: CallDefinition): string {
   }
 }
 
-function outcomeLines(run: Run, call: ToolCallBundle): string[] {
-  const claim = claimText(call.definition);
-  const raw = driverReply(run, call);
-  const lines = [`Claim: ${claim}`];
+
+function clip(text: string, limit: number): string {
+  const flat = text.replaceAll("\n", " ").replaceAll(/\s+/g, " ").trim();
+  if (flat.length <= limit) return flat;
+  return `${flat.slice(0, limit)}...`;
+}
+
+function findingPhrase(finding: Finding): string {
+  const subject = subjectText(finding.subject);
+  switch (finding.rule) {
+    case "spawned_process":
+      return `Spawned ${subject}`;
+    case "file_modified":
+      return `Changed ${subject}`;
+    case "credential_access":
+      return `Read ${subject}`;
+    case "network_attempt":
+      return `Network ${subject}`;
+    case "late_code_load":
+      return `Loaded ${subject}`;
+    case "canary_exposed":
+      return `Canary in ${subject}`;
+    default: {
+      const _exhaustive: never = finding.rule;
+      return _exhaustive;
+    }
+  }
+}
+
+function contentText(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || !("text" in value)) return null;
+  return typeof value.text === "string" ? value.text : null;
+}
+
+function replyText(run: Run, call: ToolCallBundle): string {
   switch (call.outcome.kind) {
-    case "reply":
-      lines.push(`Outcome: ${outcomeLabel(call.outcome)}`);
-      lines.push("Reply:");
-      lines.push(raw ?? JSON.stringify(call.outcome.content));
-      return lines;
-    case "rpc_error":
-      lines.push(`Outcome: rpc_error ${call.outcome.code} ${call.outcome.message}`);
-      if (raw !== null) {
-        lines.push("Reply:");
-        lines.push(raw);
+    case "reply": {
+      const texts: string[] = [];
+      for (const item of call.outcome.content) {
+        const text = contentText(item);
+        if (text !== null) texts.push(text);
       }
-      return lines;
+      const body = texts.length > 0 ? texts.join(" ") : (driverReply(run, call) ?? JSON.stringify(call.outcome.content));
+      return clip(call.outcome.is_error ? `error ${body}` : body, 240);
+    }
+    case "rpc_error":
+      return clip(`error ${call.outcome.code} ${call.outcome.message}`, 240);
     case "no_reply":
-      lines.push(`Outcome: no reply (${call.outcome.reason})`);
-      return lines;
+      return `no reply (${call.outcome.reason})`;
     default: {
       const _exhaustive: never = call.outcome;
       return _exhaustive;
@@ -862,238 +559,230 @@ function outcomeLines(run: Run, call: ToolCallBundle): string[] {
   }
 }
 
-function toolText(profile: StaticProfile, name: string): ToolText | undefined {
-  return profile.tool_texts.find((text) => text.tool === name);
+function sourceCell(finding: Finding): string {
+  if (finding.source_hints.length === 0) return "none";
+  return finding.source_hints.map((hint) => `${hint.file}:${hint.line}`).join(", ");
 }
 
-function definitionLines(call: ToolCallBundle, profile: StaticProfile): string[] {
-  const text = toolText(profile, call.tool);
-  const sites = profile.tool_sites.find((entry) => entry.tool === call.tool);
-  const lines: string[] = [];
-  switch (call.definition.kind) {
-    case "advertised": {
-      const tool = call.definition.tool;
-      lines.push(`Description: ${tool.description ?? ""}`);
-      lines.push(...escapedLines(text));
-      lines.push("Schema:", JSON.stringify(tool.input_schema, null, 2));
-      lines.push(...annotationLines(tool.annotations));
-      break;
-    }
-    case "not_advertised":
-      lines.push("Description: not advertised");
-      lines.push(...escapedLines(text));
-      lines.push("Schema: none");
-      lines.push("Annotations: none");
-      break;
+function whatCell(finding: Finding): string {
+  const subject = subjectText(finding.subject);
+  if (finding.kind !== "call" || finding.claim_check.annotation_conflict === null) return subject;
+  return `${subject} (annotation ${finding.claim_check.annotation_conflict})`;
+}
+
+function conciseFindings(run: Run, findings: readonly Finding[]): string[] {
+  if (findings.length === 0) return [];
+  const rows = findings.map((finding) => [
+    whatCell(finding),
+    finding.rule,
+    strengthCell(run, finding),
+    afterReplyCell(run, finding),
+    sourceCell(finding),
+  ]);
+  return [markdownTable(["What happened", "Rule", "Link", "After reply", "Source"], rows)];
+}
+
+function localNoise(finding: Finding): boolean {
+  switch (finding.subject.kind) {
+    case "peer":
+      switch (finding.subject.peer.kind) {
+        case "unix":
+          return true;
+        case "ip":
+          return finding.subject.peer.address === "127.0.0.1" || finding.subject.peer.address === "::1";
+        case "none":
+          return false;
+        default: {
+          const _exhaustive: never = finding.subject.peer;
+          return _exhaustive;
+        }
+      }
+    case "path":
+      return finding.subject.path.endsWith("/nscd/socket");
+    case "dns_name":
+    case "argv":
+    case "flow":
+      return false;
     default: {
-      const _exhaustive: never = call.definition;
+      const _exhaustive: never = finding.subject;
       return _exhaustive;
     }
   }
-  lines.push("Source sites:");
-  if (sites === undefined || sites.sites.length === 0) lines.push("none");
-  else for (const site of sites.sites) lines.push(`${site.file}:${site.line} ${site.snippet}`);
-  return lines;
 }
 
-function escapedLines(text: ToolText | undefined): string[] {
-  if (text === undefined) return [];
-  const lines = [`Escaped description: ${text.escaped_description}`, `Length: ${text.length}`];
-  if (descriptionTooLong(text)) lines.push("Description is longer than 1000 characters.");
-  for (const flag of text.flags) lines.push(`Flag: ${flag.kind} ${flag.phrase}`);
-  return lines;
+function glanceRank(finding: Finding): number {
+  switch (finding.rule) {
+    case "canary_exposed":
+      return 0;
+    case "credential_access":
+      return 1;
+    case "late_code_load":
+      return 2;
+    case "network_attempt":
+      return localNoise(finding) ? 6 : 3;
+    case "spawned_process":
+      return 4;
+    case "file_modified":
+      return 5;
+    default: {
+      const _exhaustive: never = finding.rule;
+      return _exhaustive;
+    }
+  }
 }
 
-function advertisedTool(run: Run, name: string): ToolDefinition | undefined {
-  return run.startup.advertised_tools.find((tool) => tool.name === name);
+function activityText(run: Run, call: ToolCallBundle, findings: readonly Finding[]): string {
+  if (findings.length === 0) return replyText(run, call);
+  const ranked = [...findings].sort((left, right) => glanceRank(left) - glanceRank(right));
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  for (const finding of ranked) {
+    const subject = subjectText(finding.subject);
+    if (seen.has(subject)) continue;
+    seen.add(subject);
+    labels.push(findingPhrase(finding));
+  }
+  const shown = labels.slice(0, 3);
+  const extra = labels.length - shown.length;
+  const body = shown.join(". ");
+  return extra > 0 ? `${body}. +${extra} more` : body;
 }
 
-function runHeader(run: Run, judgments: readonly Judgment[] | null): string {
-  const duration = shutdownEnd(run.shutdown) - run.startup.window.start_us;
+function unmentioned(findings: readonly Finding[]): boolean {
+  return findings.some((finding) => finding.kind === "call" && finding.claim_check.interface_mentions === null);
+}
+
+function headline(glances: readonly Glance[], unexpected: number, callCount: number): string {
+  if (callCount === 0) return "No tool calls.";
+  const bad = glances.filter((glance) => glance === "does_not_match").length;
+  const muddy = glances.filter((glance) => glance === "unclear" || glance === "invalid").length;
+  const pending = glances.filter((glance) => glance === "judge not run" || glance === "no judgment").length;
+  const noun = callCount === 1 ? "call" : "calls";
+  if (bad > 0) return `Does not match. ${bad} of ${callCount} ${noun} did something the description does not cover.`;
+  if (muddy > 0) return `Unclear. ${muddy} of ${callCount} ${noun} could not be judged.`;
+  if (pending > 0) {
+    if (unexpected > 0) {
+      return `Judge not run. ${unexpected} of ${callCount} ${noun} did something the description does not mention.`;
+    }
+    return "Judge not run. No call had an unmentioned side effect.";
+  }
+  return `Matches. All ${callCount} ${noun} did what they claim.`;
+}
+
+function phaseGlance(label: string, findings: readonly Finding[]): string | null {
+  if (findings.length === 0) return null;
+  return `${label}: ${findings.map((finding) => findingPhrase(finding)).join(". ")}.`;
+}
+
+function verdictSection(run: Run, findings: readonly Finding[], judgments: readonly Judgment[] | null): string {
+  const glances: Glance[] = [];
+  let unexpected = 0;
+  const rows: string[][] = [];
+  for (const call of run.tool_calls) {
+    const glance = glanceOf(judgments, call.call_id);
+    glances.push(glance);
+    const forCall = callFindings(findings, call.call_id);
+    if (unmentioned(forCall)) unexpected += 1;
+    rows.push([
+      String(toolCallSeq(run, call.call_id) ?? "none"),
+      call.tool,
+      glanceWords(glance),
+      activityText(run, call, forCall),
+    ]);
+  }
   const clock = run.clock_check;
-  const lines = [
-    "# Run",
-    "",
-    `Run: ${run.run_id}`,
-    `Target: ${run.target.name}`,
-    `Version: ${run.startup.server_info.version}`,
-    `Source: ${sourceText(run.target.source)}`,
-    `Image: ${run.target.image_id}`,
-    `Command: ${run.target.command.map((arg) => JSON.stringify(arg)).join(" ")}`,
-    networkText(run.network),
-    `Duration: ${duration} us`,
-    `Clock check: ${clockPassed(clock) ? "passed" : "failed"} (max_violation_us ${clock.max_violation_us}, responses_checked ${clock.responses_checked})`,
-  ];
+  const lines = ["# Verdict", "", headline(glances, unexpected, run.tool_calls.length)];
   if (clock.max_violation_us > CLOCK_TOLERANCE_US) {
     lines.push(`Warning: max_violation_us ${clock.max_violation_us} exceeds ${CLOCK_TOLERANCE_US}`);
   }
+  if (rows.length > 0) lines.push("", markdownTable(["Call", "Tool", "Verdict", "What happened"], rows));
+  const notes = [
+    phaseGlance("Startup", startupFindings(findings)),
+    phaseGlance("Shutdown", shutdownFindings(findings)),
+    phaseGlance("Unmatched", unmatchedFindings(findings)),
+  ].filter((note): note is string => note !== null);
+  if (notes.length > 0) lines.push("", ...notes);
+  lines.push(
+    "",
+    `${run.target.name} ${run.startup.server_info.version}. ${sourceText(run.target.source)}. Run ${run.run_id}.`,
+    networkText(run.network),
+    `Clock check: ${clockPassed(clock) ? "passed" : "failed"} (max_violation_us ${clock.max_violation_us}, responses_checked ${clock.responses_checked})`,
+  );
   if (judgments !== null) {
     lines.push("This run sent tool descriptions, source snippets, and each event's parsed body to Anthropic.");
   }
+  lines.push("Event detail is in bundles.json.");
   return lines.join("\n");
 }
 
-function summaryRow(
-  label: string,
-  outcome: string,
-  findings: readonly Finding[],
-  entries: readonly { readonly event: Event; readonly link: Link }[],
-  spawned: number,
-  after: string,
-  judge: string,
-): string[] {
-  const strength = countStrength(entries);
-  return [
-    label,
-    outcome,
-    ...ruleCounts(findings).map(String),
-    String(strength.strong),
-    String(strength.weak),
-    String(spawned),
-    after,
-    judge,
-  ];
-}
-
-function summarySection(run: Run, findings: readonly Finding[], judgments: readonly Judgment[] | null): string {
-  const rows: string[][] = [];
-  const startupEvents = eventsOf(run.startup.events);
-  rows.push(
-    summaryRow(
-      "startup",
-      "startup",
-      startupFindings(findings),
-      run.startup.events,
-      spawnCount(startupEvents),
-      "-",
-      "-",
-    ),
-  );
-  for (const call of run.tool_calls) {
-    const seq = toolCallSeq(run, call.call_id);
-    rows.push(
-      summaryRow(
-        `tool call ${seq ?? "none"} ${call.tool}`,
-        outcomeLabel(call.outcome),
-        callFindings(findings, call.call_id),
-        call.events,
-        spawnCount(eventsOf(call.events)),
-        String(countAfterReply(call)),
-        judgeSummary(judgments, call.call_id),
-      ),
-    );
+function hiddenTextLines(profile: StaticProfile): string[] {
+  const lines: string[] = [];
+  for (const text of profile.tool_texts) {
+    const notes: string[] = [];
+    if (text.escaped_description.includes("\\u") || text.escaped_description.includes("\\x")) {
+      notes.push(clip(text.escaped_description, 180));
+    }
+    if (descriptionTooLong(text)) notes.push("description longer than 1000 characters");
+    for (const flag of text.flags) notes.push(`phrase "${flag.phrase}"`);
+    if (notes.length > 0) lines.push(`${text.tool}: ${notes.join(". ")}`);
   }
-  const shutdownEvents = eventsOf(run.shutdown.events);
-  rows.push(
-    summaryRow(
-      "shutdown",
-      shutdownLabel(run.shutdown.trigger),
-      shutdownFindings(findings),
-      run.shutdown.events,
-      spawnCount(shutdownEvents),
-      "-",
-      "-",
-    ),
-  );
-  return [
-    "# Summary",
-    "",
-    markdownTable(
-      ["bundle", "outcome", ...RULE_NAMES, "strong", "weak", "spawned", "after reply", "judge"],
-      rows,
-    ),
-  ].join("\n");
+  return lines;
 }
 
-function staticProfileSection(run: Run, profile: StaticProfile): string {
+function packageSection(profile: StaticProfile): string {
   const lines = [
-    "# Static profile",
+    "# Package",
     "",
-    `Package: ${profile.package.name}`,
-    `Version: ${profile.package.version ?? "none"}`,
-    `Ecosystem: ${profile.package.ecosystem}`,
-    `Manifest: ${profile.package.manifest_path ?? "none"}`,
-    "Dependencies:",
+    `${profile.package.name} ${profile.package.version ?? "none"}. ${profile.package.ecosystem}. Manifest ${profile.package.manifest_path ?? "none"}.`,
   ];
-  if (profile.dependencies.length === 0) lines.push("none");
-  else for (const dependency of profile.dependencies) lines.push(`${dependency.name}: ${dependency.spec}`);
+  if (profile.dependencies.length === 0) lines.push("Dependencies: none");
+  else lines.push(`Dependencies: ${profile.dependencies.map((item) => `${item.name} ${item.spec}`).join(", ")}`);
   if (profile.install_scripts.length === 0) lines.push("Install scripts: none");
   else {
     lines.push("Install scripts: ran at build time, not observed");
     for (const script of profile.install_scripts) lines.push(`${script.hook}: ${script.command}`);
   }
-  lines.push("Advertised tools:");
-  if (profile.tool_texts.length === 0) lines.push("none");
-  for (const text of profile.tool_texts) {
-    lines.push(`### ${text.tool}`);
-    lines.push(...escapedLines(text));
-    const tool = advertisedTool(run, text.tool);
-    if (tool === undefined) {
-      lines.push("Schema: none");
-      lines.push("Annotations: none");
-      continue;
-    }
-    lines.push("Schema:", JSON.stringify(tool.input_schema, null, 2));
-    lines.push(...annotationLines(tool.annotations));
+  const hidden = hiddenTextLines(profile);
+  if (hidden.length > 0) {
+    lines.push("Hidden description text:");
+    lines.push(...hidden);
   }
-  lines.push("API hints:");
-  if (profile.api_hints.length === 0) lines.push("none");
+  if (profile.api_hints.length === 0) lines.push("API hints: none");
   else {
-    for (const hint of profile.api_hints) {
-      lines.push(`${hint.category} ${hint.file}:${hint.line} ${hint.pattern} ${hint.snippet}`);
-    }
+    lines.push("API hints:");
+    for (const hint of profile.api_hints) lines.push(`${hint.category} ${hint.file}:${hint.line} ${clip(hint.snippet.trim(), 100)}`);
   }
   return lines.join("\n");
 }
 
-function phaseSection(
-  title: string,
-  run: Run,
-  findings: readonly Finding[],
-  events: readonly Event[],
-  tree: string[],
-): string {
-  return [
-    title,
-    "",
-    ...findingsTable(run, findings),
-    "Process tree:",
-    ...tree,
-    ...networkLines(run, events),
-    "Credential access:",
-    ...credentialLines(events, findings),
-    "File activity:",
-    ...fileActivity(events, findings),
-  ].join("\n");
+function phaseSection(title: string, run: Run, findings: readonly Finding[]): string {
+  const table = conciseFindings(run, findings);
+  return [title, "", ...(table.length === 0 ? ["No findings."] : table)].join("\n");
 }
 
 function toolSection(
   run: Run,
-  profile: StaticProfile,
   findings: readonly Finding[],
   judgments: readonly Judgment[] | null,
   call: ToolCallBundle,
 ): string {
   const seq = toolCallSeq(run, call.call_id);
-  const owned = new Set(ownedProcesses(run, call).map((process) => process.pid));
-  const events = eventsOf(call.events);
-  const callFindingsFor = callFindings(findings, call.call_id);
-  return [
+  const glance = glanceOf(judgments, call.call_id);
+  const forCall = callFindings(findings, call.call_id);
+  const lines = [
     `# Tool call ${seq ?? "none"}: ${call.tool}`,
     "",
-    "Does this match what the tool claims?",
-    ...definitionLines(call, profile),
-    `Arguments (${argumentSourceText(call.argument_source)}):`,
-    JSON.stringify(call.arguments, null, 2),
-    ...outcomeLines(run, call),
-    ...networkLines(run, events),
-    ...findingsTable(run, callFindingsFor),
-    "Process subtree:",
-    ...processTree(run, (process) => process.kind === "child" && owned.has(process.pid), call),
-    "File activity:",
-    ...fileActivity(events, callFindingsFor),
-    ...judgeLines(call, judgments),
-  ].join("\n");
+    `${glanceWords(glance)}. ${clip(claimText(call.definition), 180)}`,
+    "",
+    `Arguments (${argumentSourceText(call.argument_source)}): ${clip(JSON.stringify(call.arguments), 240)}`,
+    `Reply: ${replyText(run, call)}`,
+  ];
+  const flows = flowSummaries(run, eventsOf(call.events));
+  if (flows.length > 0) lines.push("", ...flows);
+  const table = conciseFindings(run, forCall);
+  if (table.length > 0) lines.push("", ...table);
+  lines.push("", ...judgeLines(call, judgments));
+  return lines.join("\n");
 }
 
 function afterHint(run: Run, preceded: GapPredecessor): string {
@@ -1126,14 +815,81 @@ function reasonText(run: Run, reason: UnmatchedReason): string {
   }
 }
 
+
+function showUnmatchedFile(action: FileAction): boolean {
+  switch (action.kind) {
+    case "open":
+      return action.access !== "read" || action.created || sensitivePath(action.path);
+    case "stat":
+    case "access":
+    case "readlink":
+      return sensitivePath(action.path);
+    case "rename":
+    case "link":
+    case "symlink":
+    case "unlink":
+    case "mkdir":
+    case "rmdir":
+    case "chmod":
+    case "chown":
+    case "truncate":
+    case "utime":
+    case "chdir":
+    case "mknod":
+    case "xattr":
+    case "other":
+      return true;
+    default: {
+      const _exhaustive: never = action;
+      return _exhaustive;
+    }
+  }
+}
+
+function showUnmatched(event: Event, cited: ReadonlySet<string>): boolean {
+  if (cited.has(event.event_id)) return true;
+  switch (event.body.kind) {
+    case "net":
+      return true;
+    case "process":
+      switch (event.body.action.kind) {
+        case "spawn":
+        case "exec":
+          return true;
+        case "thread":
+        case "exit":
+          return false;
+        default: {
+          const _exhaustive: never = event.body.action;
+          return _exhaustive;
+        }
+      }
+    case "file":
+      return showUnmatchedFile(event.body.action);
+    case "data":
+    case "other":
+      return false;
+    default: {
+      const _exhaustive: never = event.body;
+      return _exhaustive;
+    }
+  }
+}
+
 function unmatchedSection(run: Run, findings: readonly Finding[]): string {
+  const relevant = unmatchedFindings(findings);
+  const cited = citedIds(relevant);
+  const shown = run.unmatched.filter((entry) => showUnmatched(entry.event, cited));
+  const hidden = run.unmatched.length - shown.length;
   const lines = ["# Unmatched", ""];
-  if (run.unmatched.length === 0) lines.push("none");
-  for (const entry of run.unmatched) {
+  if (shown.length === 0 && hidden === 0) lines.push("none");
+  for (const entry of shown) {
     lines.push(`${entry.event.event_id} ${reasonText(run, entry.reason)}`);
     lines.push(describeEvent(entry.event));
   }
-  lines.push(...findingsTable(run, unmatchedFindings(findings)));
+  if (hidden > 0) lines.push(`${hidden} other unmatched events are in bundles.json.`);
+  const table = conciseFindings(run, relevant);
+  if (table.length > 0) lines.push(...table);
   return lines.join("\n");
 }
 
@@ -1167,31 +923,15 @@ function readJudgments(runDir: string, run: Run): readonly Judgment[] | null {
   return parseJudgments(readFileSync(path, "utf8"), "judgments.json", run);
 }
 
+
 function render(run: Run, profile: StaticProfile, findings: readonly Finding[], judgments: readonly Judgment[] | null): string {
-  const startupEvents = eventsOf(run.startup.events);
-  const shutdownEvents = eventsOf(run.shutdown.events);
-  const parts = [
-    runHeader(run, judgments),
-    summarySection(run, findings, judgments),
-    staticProfileSection(run, profile),
-    phaseSection(
-      "# Startup",
-      run,
-      startupFindings(findings),
-      startupEvents,
-      processTree(run, startupProcess, null),
-    ),
-  ];
-  for (const call of run.tool_calls) parts.push(toolSection(run, profile, findings, judgments, call));
+  const parts = [verdictSection(run, findings, judgments)];
+  for (const call of run.tool_calls) parts.push(toolSection(run, findings, judgments, call));
   parts.push(
-    phaseSection(
-      "# Shutdown",
-      run,
-      shutdownFindings(findings),
-      shutdownEvents,
-      processTree(run, shutdownProcess, null),
-    ),
+    phaseSection("# Startup", run, startupFindings(findings)),
+    phaseSection("# Shutdown", run, shutdownFindings(findings)),
     unmatchedSection(run, findings),
+    packageSection(profile),
     limitsSection(profile),
   );
   return document(parts);
