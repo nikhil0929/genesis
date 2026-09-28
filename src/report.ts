@@ -21,16 +21,12 @@ import type {
   CallDefinition,
   CallId,
   Event,
-  ExitEnd,
-  FileAction,
   Finding,
   FindingSubject,
   GapPredecessor,
   HttpBody,
   Judgment,
-  NetBody,
   Peer,
-  ProcessAction,
   ProxyFlow,
   Run,
   RunNetwork,
@@ -38,7 +34,6 @@ import type {
   TargetSource,
   ToolCallBundle,
   UnmatchedReason,
-  WriteTarget,
 } from "./model.js";
 import { attribute } from "./attribution.js";
 import { readEnvelope } from "./host-seal.js";
@@ -68,6 +63,19 @@ function tableCell(value: string): string {
 
 function document(parts: readonly string[]): string {
   return `${parts.join("\n\n")}\n`;
+}
+
+function bulletList(items: readonly string[]): string[] {
+  if (items.length === 0) return [];
+  return ["", ...items.map((item) => `- ${item}`)];
+}
+
+function jsonBlock(value: unknown): string[] {
+  return ["", "```json", JSON.stringify(value, null, 2), "```"];
+}
+
+function inlineCode(text: string): string {
+  return `\`${text.replaceAll("`", "'")}\``;
 }
 
 function sourceText(source: TargetSource): string {
@@ -111,110 +119,6 @@ function describePeer(peer: Peer): string {
   }
 }
 
-
-function describeExit(end: ExitEnd): string {
-  switch (end.kind) {
-    case "exited":
-      return `exited ${end.status}`;
-    case "killed":
-      return `killed ${end.signal}`;
-    default: {
-      const _exhaustive: never = end;
-      return _exhaustive;
-    }
-  }
-}
-
-function describeProcess(action: ProcessAction): string {
-  switch (action.kind) {
-    case "spawn":
-      return `spawn ${action.child_pid}${action.untraced ? " untraced" : ""}`;
-    case "thread":
-      return `thread ${action.tid}`;
-    case "exec":
-      return `exec ${action.path} ${action.argv.join(" ")}`;
-    case "exit":
-      return `exit ${describeExit(action.end)}`;
-    default: {
-      const _exhaustive: never = action;
-      return _exhaustive;
-    }
-  }
-}
-
-function describeFile(action: FileAction): string {
-  switch (action.kind) {
-    case "open":
-      return `open ${action.access}${action.created ? " created" : ""} ${action.path}`;
-    case "rename":
-    case "link":
-    case "symlink":
-      return `${action.kind} ${action.path} ${action.second_path}`;
-    case "stat":
-    case "access":
-    case "readlink":
-    case "unlink":
-    case "mkdir":
-    case "rmdir":
-    case "chmod":
-    case "chown":
-    case "truncate":
-    case "utime":
-    case "chdir":
-    case "mknod":
-    case "xattr":
-    case "other":
-      return `${action.kind} ${action.path}`;
-    default: {
-      const _exhaustive: never = action;
-      return _exhaustive;
-    }
-  }
-}
-
-function describeTarget(target: WriteTarget): string {
-  switch (target.kind) {
-    case "file":
-      return `file ${target.path}`;
-    case "socket":
-      return `socket ${describePeer(target.peer)}`;
-    case "pipe":
-      return `pipe ${target.inode}`;
-    case "stdout":
-      return "stdout";
-    case "stderr":
-      return "stderr";
-    default: {
-      const _exhaustive: never = target;
-      return _exhaustive;
-    }
-  }
-}
-
-function describeNet(body: NetBody): string {
-  const dns = body.dns_name ?? "none";
-  const flow = body.proxy_flow_id ?? "none";
-  return `${body.op} ${body.family} ${body.protocol} ${describePeer(body.peer)} dns ${dns} flow ${flow}`;
-}
-
-function describeEvent(event: Event): string {
-  switch (event.body.kind) {
-    case "file":
-      return describeFile(event.body.action);
-    case "data":
-      return `data ${describeTarget(event.body.target)} ${event.body.byte_count} bytes`;
-    case "net":
-      return describeNet(event.body);
-    case "process":
-      return describeProcess(event.body.action);
-    case "other":
-      return event.body.unparsed === null ? "other" : `other ${event.body.unparsed}`;
-    default: {
-      const _exhaustive: never = event.body;
-      return _exhaustive;
-    }
-  }
-}
 
 function subjectText(subject: FindingSubject): string {
   switch (subject.kind) {
@@ -283,32 +187,6 @@ function afterReplyCell(run: Run, finding: Finding): string {
 
 function strengthCell(run: Run, finding: Finding): string {
   return findingStrength(run, finding) ?? "none";
-}
-
-// These paths stay listed. The rules module owns the same set, and this file cannot import it.
-function sensitivePath(path: string): boolean {
-  const exact = new Set([
-    "/home/detonee/.aws/credentials",
-    "/home/detonee/.ssh/id_ed25519",
-    "/home/detonee/.config/gh/hosts.yml",
-    "/home/detonee/.npmrc",
-    "/home/detonee/.netrc",
-    "/home/detonee/.docker/config.json",
-    "/home/detonee/.kube/config",
-    "/work/.env",
-    "/etc/shadow",
-    "/home/detonee/.bash_history",
-    "/home/detonee/.zsh_history",
-    "/root/.bash_history",
-    "/root/.zsh_history",
-  ]);
-  if (exact.has(path) || /^\/proc\/[0-9]+\/environ$/.test(path)) return true;
-  const prefixes = [
-    "/home/detonee/.config/google-chrome",
-    "/home/detonee/.config/chromium",
-    "/home/detonee/.mozilla/firefox",
-  ];
-  return prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
 }
 
 function citedIds(findings: readonly Finding[]): Set<string> {
@@ -441,28 +319,21 @@ function glanceWords(glance: Glance): string {
 function judgeLines(call: ToolCallBundle, judgments: readonly Judgment[] | null): string[] {
   const lines = ["LLM opinion, not evidence"];
   const judgment = judgmentFor(judgments, call.call_id);
-  if (judgment === null) {
-    lines.push("judge not run");
-    return lines;
-  }
-  if (judgment === undefined) {
-    lines.push("no judgment");
-    return lines;
-  }
+  if (judgment === null) return [...lines, ...bulletList(["judge not run"])];
+  if (judgment === undefined) return [...lines, ...bulletList(["no judgment"])];
   switch (judgment.kind) {
     case "invalid":
-      lines.push("invalid");
-      lines.push(judgment.error);
-      return lines;
-    case "answer":
-      lines.push(glanceWords(judgment.answer.opinion));
+      return [...lines, ...bulletList(["invalid", judgment.error])];
+    case "answer": {
+      const items = [glanceWords(judgment.answer.opinion)];
       if (judgment.answer.opinion !== "matches" || judgment.answer.mismatches.length > 0) {
-        lines.push(judgment.answer.summary);
+        items.push(judgment.answer.summary);
       }
       for (const mismatch of judgment.answer.mismatches) {
-        lines.push(`Mismatch ${mismatch.event_ids.join(", ")}: ${mismatch.explanation}`);
+        items.push(`Mismatch ${mismatch.event_ids.join(", ")}: ${mismatch.explanation}`);
       }
-      return lines;
+      return [...lines, ...bulletList(items)];
+    }
     default: {
       const _exhaustive: never = judgment;
       return _exhaustive;
@@ -564,16 +435,33 @@ function sourceCell(finding: Finding): string {
   return finding.source_hints.map((hint) => `${hint.file}:${hint.line}`).join(", ");
 }
 
-function whatCell(finding: Finding): string {
+function unmatchedWhen(run: Run, finding: Finding): string {
+  if (finding.kind !== "unmatched") return "";
+  const reasons: string[] = [];
+  for (const id of finding.evidence) {
+    const entry = run.unmatched.find((item) => item.event.event_id === id);
+    if (entry === undefined) continue;
+    const text = reasonText(run, entry.reason);
+    if (!reasons.includes(text)) reasons.push(text);
+  }
+  return reasons.join(", ");
+}
+
+function whatCell(run: Run, finding: Finding): string {
   const subject = subjectText(finding.subject);
-  if (finding.kind !== "call" || finding.claim_check.annotation_conflict === null) return subject;
-  return `${subject} (annotation ${finding.claim_check.annotation_conflict})`;
+  const conflict =
+    finding.kind === "call" && finding.claim_check.annotation_conflict !== null
+      ? ` (annotation ${finding.claim_check.annotation_conflict})`
+      : "";
+  const when = unmatchedWhen(run, finding);
+  const timing = when === "" ? "" : ` (${when})`;
+  return `${subject}${conflict}${timing}`;
 }
 
 function conciseFindings(run: Run, findings: readonly Finding[]): string[] {
   if (findings.length === 0) return [];
   const rows = findings.map((finding) => [
-    whatCell(finding),
+    whatCell(run, finding),
     finding.rule,
     strengthCell(run, finding),
     afterReplyCell(run, finding),
@@ -693,7 +581,7 @@ function verdictSection(run: Run, findings: readonly Finding[], judgments: reado
   const clock = run.clock_check;
   const lines = ["# Verdict", "", headline(glances, unexpected, run.tool_calls.length)];
   if (clock.max_violation_us > CLOCK_TOLERANCE_US) {
-    lines.push(`Warning: max_violation_us ${clock.max_violation_us} exceeds ${CLOCK_TOLERANCE_US}`);
+    lines.push(...bulletList([`Warning: max_violation_us ${clock.max_violation_us} exceeds ${CLOCK_TOLERANCE_US}`]));
   }
   if (rows.length > 0) lines.push("", markdownTable(["Call", "Tool", "Verdict", "What happened"], rows));
   const notes = [
@@ -701,17 +589,17 @@ function verdictSection(run: Run, findings: readonly Finding[], judgments: reado
     phaseGlance("Shutdown", shutdownFindings(findings)),
     phaseGlance("Unmatched", unmatchedFindings(findings)),
   ].filter((note): note is string => note !== null);
-  if (notes.length > 0) lines.push("", ...notes);
-  lines.push(
-    "",
+  lines.push(...bulletList(notes));
+  const meta = [
     `${run.target.name} ${run.startup.server_info.version}. ${sourceText(run.target.source)}. Run ${run.run_id}.`,
     networkText(run.network),
     `Clock check: ${clockPassed(clock) ? "passed" : "failed"} (max_violation_us ${clock.max_violation_us}, responses_checked ${clock.responses_checked})`,
-  );
+  ];
   if (judgments !== null) {
-    lines.push("This run sent tool descriptions, source snippets, and each event's parsed body to Anthropic.");
+    meta.push("This run sent tool descriptions, source snippets, and each event's parsed body to Anthropic.");
   }
-  lines.push("Event detail is in bundles.json.");
+  meta.push("Event detail is in bundles.json.");
+  lines.push(...bulletList(meta));
   return lines.join("\n");
 }
 
@@ -720,7 +608,7 @@ function hiddenTextLines(profile: StaticProfile): string[] {
   for (const text of profile.tool_texts) {
     const notes: string[] = [];
     if (text.escaped_description.includes("\\u") || text.escaped_description.includes("\\x")) {
-      notes.push(clip(text.escaped_description, 180));
+      notes.push(inlineCode(clip(text.escaped_description, 180)));
     }
     if (descriptionTooLong(text)) notes.push("description longer than 1000 characters");
     for (const flag of text.flags) notes.push(`phrase "${flag.phrase}"`);
@@ -730,27 +618,26 @@ function hiddenTextLines(profile: StaticProfile): string[] {
 }
 
 function packageSection(profile: StaticProfile): string {
-  const lines = [
-    "# Package",
-    "",
+  const items = [
     `${profile.package.name} ${profile.package.version ?? "none"}. ${profile.package.ecosystem}. Manifest ${profile.package.manifest_path ?? "none"}.`,
   ];
-  if (profile.dependencies.length === 0) lines.push("Dependencies: none");
-  else lines.push(`Dependencies: ${profile.dependencies.map((item) => `${item.name} ${item.spec}`).join(", ")}`);
-  if (profile.install_scripts.length === 0) lines.push("Install scripts: none");
-  else {
-    lines.push("Install scripts: ran at build time, not observed");
-    for (const script of profile.install_scripts) lines.push(`${script.hook}: ${script.command}`);
-  }
+  if (profile.dependencies.length === 0) items.push("Dependencies: none");
+  else items.push(`Dependencies: ${profile.dependencies.map((item) => `${item.name} ${item.spec}`).join(", ")}`);
+  if (profile.install_scripts.length === 0) items.push("Install scripts: none");
+  else items.push("Install scripts: ran at build time, not observed");
+  const lines = ["# Package", ...bulletList(items)];
+  for (const script of profile.install_scripts) lines.push(`  - ${script.hook}: ${inlineCode(script.command)}`);
   const hidden = hiddenTextLines(profile);
   if (hidden.length > 0) {
-    lines.push("Hidden description text:");
-    lines.push(...hidden);
+    lines.push("- Hidden description text:");
+    for (const line of hidden) lines.push(`  - ${line}`);
   }
-  if (profile.api_hints.length === 0) lines.push("API hints: none");
+  if (profile.api_hints.length === 0) lines.push("- API hints: none");
   else {
-    lines.push("API hints:");
-    for (const hint of profile.api_hints) lines.push(`${hint.category} ${hint.file}:${hint.line} ${clip(hint.snippet.trim(), 100)}`);
+    lines.push("- API hints:");
+    for (const hint of profile.api_hints) {
+      lines.push(`  - ${hint.category} ${hint.file}:${hint.line} ${inlineCode(clip(hint.snippet.trim(), 100))}`);
+    }
   }
   return lines.join("\n");
 }
@@ -774,11 +661,28 @@ function toolSection(
     "",
     `${glanceWords(glance)}. ${clip(claimText(call.definition), 180)}`,
     "",
-    `Arguments (${argumentSourceText(call.argument_source)}): ${clip(JSON.stringify(call.arguments), 240)}`,
-    `Reply: ${replyText(run, call)}`,
+    `Arguments (${argumentSourceText(call.argument_source)}):`,
+    ...jsonBlock(call.arguments),
+    "",
+    "Reply:",
   ];
+  switch (call.outcome.kind) {
+    case "reply":
+      lines.push(...jsonBlock(call.outcome.content));
+      break;
+    case "rpc_error":
+      lines.push(...bulletList([`error ${call.outcome.code} ${call.outcome.message}`]));
+      break;
+    case "no_reply":
+      lines.push(...bulletList([`no reply (${call.outcome.reason})`]));
+      break;
+    default: {
+      const _exhaustive: never = call.outcome;
+      return _exhaustive;
+    }
+  }
   const flows = flowSummaries(run, eventsOf(call.events));
-  if (flows.length > 0) lines.push("", ...flows);
+  lines.push(...bulletList(flows));
   const table = conciseFindings(run, forCall);
   if (table.length > 0) lines.push("", ...table);
   lines.push("", ...judgeLines(call, judgments));
@@ -816,80 +720,17 @@ function reasonText(run: Run, reason: UnmatchedReason): string {
 }
 
 
-function showUnmatchedFile(action: FileAction): boolean {
-  switch (action.kind) {
-    case "open":
-      return action.access !== "read" || action.created || sensitivePath(action.path);
-    case "stat":
-    case "access":
-    case "readlink":
-      return sensitivePath(action.path);
-    case "rename":
-    case "link":
-    case "symlink":
-    case "unlink":
-    case "mkdir":
-    case "rmdir":
-    case "chmod":
-    case "chown":
-    case "truncate":
-    case "utime":
-    case "chdir":
-    case "mknod":
-    case "xattr":
-    case "other":
-      return true;
-    default: {
-      const _exhaustive: never = action;
-      return _exhaustive;
-    }
-  }
-}
-
-function showUnmatched(event: Event, cited: ReadonlySet<string>): boolean {
-  if (cited.has(event.event_id)) return true;
-  switch (event.body.kind) {
-    case "net":
-      return true;
-    case "process":
-      switch (event.body.action.kind) {
-        case "spawn":
-        case "exec":
-          return true;
-        case "thread":
-        case "exit":
-          return false;
-        default: {
-          const _exhaustive: never = event.body.action;
-          return _exhaustive;
-        }
-      }
-    case "file":
-      return showUnmatchedFile(event.body.action);
-    case "data":
-    case "other":
-      return false;
-    default: {
-      const _exhaustive: never = event.body;
-      return _exhaustive;
-    }
-  }
-}
-
 function unmatchedSection(run: Run, findings: readonly Finding[]): string {
   const relevant = unmatchedFindings(findings);
   const cited = citedIds(relevant);
-  const shown = run.unmatched.filter((entry) => showUnmatched(entry.event, cited));
-  const hidden = run.unmatched.length - shown.length;
-  const lines = ["# Unmatched", ""];
-  if (shown.length === 0 && hidden === 0) lines.push("none");
-  for (const entry of shown) {
-    lines.push(`${entry.event.event_id} ${reasonText(run, entry.reason)}`);
-    lines.push(describeEvent(entry.event));
-  }
-  if (hidden > 0) lines.push(`${hidden} other unmatched events are in bundles.json.`);
+  const hidden = run.unmatched.filter((entry) => !cited.has(entry.event.event_id)).length;
+  const lines = ["# Unmatched"];
   const table = conciseFindings(run, relevant);
-  if (table.length > 0) lines.push(...table);
+  if (table.length > 0) lines.push("", ...table);
+  const notes: string[] = [];
+  if (hidden > 0) notes.push(`${hidden} other unmatched events are in bundles.json.`);
+  if (table.length === 0 && notes.length === 0) notes.push("none");
+  lines.push(...bulletList(notes));
   return lines.join("\n");
 }
 
@@ -912,7 +753,7 @@ function limitsSection(profile: StaticProfile): string {
   if (platform.length === 0) lines.push("- Platform branches: none");
   else {
     lines.push("- Platform branches:");
-    for (const hint of platform) lines.push(`  - ${hint.file}:${hint.line} ${hint.snippet}`);
+    for (const hint of platform) lines.push(`  - ${hint.file}:${hint.line} ${inlineCode(hint.snippet)}`);
   }
   return lines.join("\n");
 }

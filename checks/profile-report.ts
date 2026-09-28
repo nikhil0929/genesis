@@ -445,12 +445,13 @@ function assertReport(report: string): void {
   for (const header of ["# Tool call 0: echo", "# Tool call 1: missing_tool"]) {
     const section = sectionAfter(report, header);
     assert.match(section, /LLM opinion, not evidence/);
-    assert.match(section, /^judge not run$/m);
+    assert.match(section, /^- judge not run$/m);
   }
   const echoSection = sectionAfter(report, "# Tool call 0: echo");
   assert.match(echoSection, /https:\/\/exfil\.example\/collect/);
   assert.match(echoSection, /aws_access_key_id/);
-  assert.match(echoSection, /Reply: 1/);
+  assert.match(echoSection, /```json/);
+  assert.match(echoSection, /"text": "1"/);
   assert.match(echoSection, /\| file_modified \|/);
   assert.match(echoSection, /\| yes \|/);
   assert.match(echoSection, /\| weak \|/);
@@ -495,10 +496,10 @@ function assertInvalidJudgment(dir: string): void {
   const judged = renderReport(dir, profileSources(dir));
   const invalidSection = sectionAfter(judged, "# Tool call 0: echo");
   const answerSection = sectionAfter(judged, "# Tool call 1: missing_tool");
-  assert.match(invalidSection, /^invalid$/m);
+  assert.match(invalidSection, /^- invalid$/m);
   assert.equal(invalidSection.includes("judge not run"), false);
   assert.match(invalidSection, /LLM opinion, not evidence/);
-  assert.match(answerSection, /^unclear$/m);
+  assert.match(answerSection, /^- unclear$/m);
   assert.match(answerSection, /No events to compare\./);
   assert.equal(answerSection.includes("judge not run"), false);
   assert.equal(judged.includes("judge not run"), false);

@@ -70,7 +70,7 @@ try {
   }
   const reportPath = join(runDir, "report.md");
   const before = readFileSync(reportPath);
-  assert.equal(before.toString("utf8").split("\n").includes("judge not run"), true);
+  assert.equal(before.toString("utf8").split("\n").includes("- judge not run"), true);
   const again = spawnSync(process.execPath, ["dist/src/cli.js", "report", runDir], {
     cwd: root,
     encoding: "utf8",

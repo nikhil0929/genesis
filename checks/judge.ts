@@ -43,7 +43,7 @@ function detonate(args: readonly string[], env?: NodeJS.ProcessEnv): string {
 
 function assertJudgeNotRun(runDir: string): void {
   const report = readFileSync(join(runDir, "report.md"), "utf8");
-  assert.ok(report.split("\n").includes("judge not run"), "report.md is missing the line judge not run");
+  assert.ok(report.split("\n").includes("- judge not run"), "report.md is missing the line - judge not run");
 }
 
 function callNamed(run: Run, name: string): ToolCallBundle {

@@ -626,9 +626,9 @@ The run directory contains:
 `report.md` has these sections in order:
 
 1. The verdict opens with a match glance. It counts calls whose judge opinion is `does_not_match`, or, when the judge did not run, calls with a side effect the description does not mention. A table has one row per tool call. The columns are call number, tool, verdict, and a short list of what happened. Startup, shutdown, and unmatched findings follow when they exist. The same section names the target, the network mode, and the clock check. In allow mode it says the container could contact real internet hosts and gives the proxy log path. Event detail stays in `bundles.json`.
-2. One section per tool call gives the verdict, the claim, the arguments, and the reply text. Joined proxy flows list method, URL, status, and canary hits. A findings table follows. The columns are what happened, rule, link, after reply, and source. The judge's opinion comes last, in a block labeled "LLM opinion, not evidence".
+2. One section per tool call gives the verdict and the claim. Arguments and the reply body are fenced `json` blocks. Proxy requests are bullets with method, URL, status, and canary hits. A findings table follows. The columns are what happened, rule, link, after reply, and source. The judge's opinion is a bullet list labeled "LLM opinion, not evidence".
 3. The startup and shutdown sections list findings only.
-4. The unmatched section lists findings and the events behind them. Routine reads stay in `bundles.json`.
+4. The unmatched section lists findings. It does not copy the process tree, the trace, or the proxy log. Those stay in `bundles.json` and `raw/`.
 5. The package section gives the package, dependencies, install-script flag, description flags, and API hints.
 6. The limits section lists what this run could not see.
 
