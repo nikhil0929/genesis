@@ -44,7 +44,7 @@ function sourcePath(value: unknown): string {
 }
 
 try {
-  const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", targetPath, "--no-judge"], {
+  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", targetPath, "--no-judge"], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,
@@ -71,7 +71,7 @@ try {
   const reportPath = join(runDir, "report.md");
   const before = readFileSync(reportPath);
   assert.equal(before.toString("utf8").split("\n").includes("judge not run"), true);
-  const again = spawnSync(process.execPath, ["dist/src/cli.js", "report", runDir], {
+  const again = spawnSync(process.execPath, ["dist/src/app/cli.js", "report", runDir], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,

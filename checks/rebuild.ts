@@ -10,7 +10,7 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const derived = ["bundles.json", "findings.json", "report.md"];
 
 function detonate(target: string): string {
-  const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", target], {
+  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", target], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,
@@ -22,7 +22,7 @@ function detonate(target: string): string {
 }
 
 function report(runDir: string): void {
-  const result = spawnSync(process.execPath, ["dist/src/cli.js", "report", runDir], {
+  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "report", runDir], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,

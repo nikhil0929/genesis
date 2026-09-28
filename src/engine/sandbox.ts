@@ -28,8 +28,8 @@ import {
   parseCanaries,
   parseFlows,
   parsePlan,
-} from "./model.js";
-import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "./model.js";
+} from "../model.js";
+import type { Canary, ProxyFlow, RegistrySource, RunNetwork, RunTarget, ScenarioEntry, Target } from "../model.js";
 import { sealSourcePath, writeHostSeal } from "./host-seal.js";
 import { rawPath } from "./run-dir.js";
 import { pruneUnscanned } from "./static-profile.js";
@@ -556,10 +556,18 @@ async function stageSource(target: Target, destination: string): Promise<void> {
 }
 
 // python:3.12-slim started the bookworm node binary, so this copy adds no apt package for node.
-// Trixie's strace 6.13 exits on the driver's --seccomp-bpf -u pair. Bookworm's strace 6.1 links only libc and accepts that pair.
+// Trixie's strace 6.13 exits on the driver's --seccomp-bpf -u pair, so strace comes from bookworm.
+// Bookworm's strace is dynamically linked against libraries slim images lack, so every library ldd names travels with it.
+// A library the target already has stays, because bookworm's libc over a newer target libc breaks every binary in the image.
 function driverRuntime(): string {
   return `COPY --from=node:24-bookworm-slim /usr/local/bin/node /usr/local/bin/node
-COPY --from=mcpdet-bins /usr/bin/strace /usr/bin/strace`;
+COPY --from=mcpdet-bins /usr/bin/strace /usr/bin/strace
+COPY --from=mcpdet-bins /mcpdet-strace-libs/ /opt/mcpdet/strace-libs/
+RUN cd /opt/mcpdet/strace-libs && find . -type f | while read -r lib; do \\
+      dest="$(printf %s "$lib" | cut -c2-)"; \\
+      [ -e "$dest" ] || { mkdir -p "$(dirname "$dest")" && cp "$lib" "$dest"; }; \\
+    done \\
+ && rm -rf /opt/mcpdet/strace-libs`;
 }
 
 function dockerfile(target: Target): string {
@@ -567,7 +575,11 @@ function dockerfile(target: Target): string {
   const setups = target.setup.map((command) => `RUN ${command}`).join("\n");
   return `FROM node:24-bookworm-slim AS mcpdet-bins
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends strace \\
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \\
+ && for lib in $(ldd /usr/bin/strace | grep -o '/[^ ]*'); do \\
+      dir="$(readlink -f "$(dirname "$lib")")"; \\
+      mkdir -p "/mcpdet-strace-libs$dir" && cp -L "$lib" "/mcpdet-strace-libs$dir/$(basename "$lib")"; \\
+    done
 FROM ${target.base_image}
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \\
  && rm -rf /var/lib/apt/lists/* \\

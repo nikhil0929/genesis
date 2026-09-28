@@ -4,8 +4,8 @@ import {
   parseInitializeResult,
   parseRun,
   parseToolsPage,
-} from "./model.js";
-import type { Event, Run, TimelineEntry, TimelineMessage, ToolDefinition } from "./model.js";
+} from "../model.js";
+import type { Event, Run, TimelineEntry, TimelineMessage, ToolDefinition } from "../model.js";
 import type { RunEnvelope } from "./sandbox.js";
 import type { SensorTrace } from "./sensors/index.js";
 

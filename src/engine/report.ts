@@ -15,7 +15,7 @@ import {
   parseTranscript,
   PREVIEW_LIMIT_BYTES,
   toolCallSeq,
-} from "./model.js";
+} from "../model.js";
 import type {
   ArgumentSource,
   CallDefinition,
@@ -39,7 +39,7 @@ import type {
   ToolCallBundle,
   UnmatchedReason,
   WriteTarget,
-} from "./model.js";
+} from "../model.js";
 import { attribute } from "./attribution.js";
 import { readEnvelope } from "./host-seal.js";
 import { judgeRun } from "./judge.js";

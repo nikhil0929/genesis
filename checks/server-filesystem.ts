@@ -125,7 +125,7 @@ function citesCredential(findings: readonly Finding[], call: ToolCallBundle, eve
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const result = spawnSync(
   process.execPath,
-  ["dist/src/cli.js", "detonate", "targets/server-filesystem.toml", "--no-judge"],
+  ["dist/src/app/cli.js", "detonate", "targets/server-filesystem.toml", "--no-judge"],
   {
     cwd: root,
     encoding: "utf8",

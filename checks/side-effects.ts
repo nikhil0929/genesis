@@ -8,7 +8,7 @@ import { parseFindings, parseRun } from "../src/model.js";
 import type { Event, Finding, Run, ToolCallBundle } from "../src/model.js";
 
 function detonate(target: string): string {
-  const result = spawnSync(process.execPath, ["dist/src/cli.js", "detonate", target], {
+  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", target], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,

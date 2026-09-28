@@ -2,8 +2,8 @@ import { decode } from "dns-packet";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { BoundaryError, CLOCK_TOLERANCE_US, parseEvents, parseProcesses } from "../model.js";
-import type { Event, ProxyFlow, RunNetwork, SensorProcesses } from "../model.js";
+import { BoundaryError, CLOCK_TOLERANCE_US, parseEvents, parseProcesses } from "../../model.js";
+import type { Event, ProxyFlow, RunNetwork, SensorProcesses } from "../../model.js";
 import { rawPath } from "../run-dir.js";
 
 export type SensorTrace = {

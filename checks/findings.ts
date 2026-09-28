@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import { parseFindings, parseRun } from "../src/model.js";
 import type { Event, Run, StaticProfile } from "../src/model.js";
-import { applyRules } from "../src/rules.js";
+import { applyRules } from "../src/engine/rules.js";
 
 const helper = {
   name: "helper",

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { descriptionTooLong } from "../src/model.js";
-import { renderReport } from "../src/report.js";
-import { profileSources } from "../src/static-profile.js";
+import { renderReport } from "../src/engine/report.js";
+import { profileSources } from "../src/engine/static-profile.js";
 
 const echoDescription = "a\\b\n";
 const wordCountDescription = `ignore previous ${"x".repeat(985)}`;

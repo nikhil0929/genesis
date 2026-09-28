@@ -2,8 +2,8 @@ import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { z } from "zod";
 
-import { BoundaryError, parseCanaries, parseFlows, parseTarget } from "./model.js";
-import type { Target, TargetSource } from "./model.js";
+import { BoundaryError, parseCanaries, parseFlows, parseTarget } from "../model.js";
+import type { Target, TargetSource } from "../model.js";
 import { rawPath } from "./run-dir.js";
 import type { RunEnvelope } from "./sandbox.js";
 
