@@ -40,32 +40,32 @@ function withWorkingSource(target: Target): Target {
 export const runsRoutes: FastifyPluginAsyncZod<RunsDeps> = async (app, deps) => {
   let inFlight: string | null = null;
 
+  // The local directory is deleted only once the archive and the row both hold the result.
   async function settle(id: string, target: Target): Promise<void> {
     const runDir = join(deps.runsDir, id);
-    let outcome: RunOutcome = { status: "succeeded" };
     try {
-      await deps.runDetonation(id, target, runDir);
-    } catch (error) {
-      app.log.error({ err: error, id }, "detonation failed");
-      outcome = { status: "failed", verdict: "incomplete" };
-    }
-    try {
-      if (outcome.status === "succeeded" || existsSync(runDir)) await deps.uploadRun(id, runDir);
-    } catch (error) {
-      app.log.error({ err: error, id }, "upload failed");
-      outcome = { status: "failed", verdict: "incomplete" };
-    }
-    try {
+      let outcome: RunOutcome = { status: "succeeded" };
+      try {
+        await deps.runDetonation(id, target, runDir);
+      } catch (error) {
+        app.log.error({ err: error, id }, "detonation failed");
+        outcome = { status: "failed", verdict: "incomplete" };
+      }
+      let archived = true;
+      try {
+        if (outcome.status === "succeeded" || existsSync(runDir)) await deps.uploadRun(id, runDir);
+      } catch (error) {
+        app.log.error({ err: error, id, runDir }, "upload failed, keeping the local run");
+        outcome = { status: "failed", verdict: "incomplete" };
+        archived = false;
+      }
       await deps.finishRun(id, outcome);
+      if (archived) await deps.deleteLocalRun(runDir);
     } catch (error) {
-      app.log.error({ err: error, id }, "finish failed");
+      app.log.error({ err: error, id, runDir }, "run did not settle, keeping the local run");
+    } finally {
+      inFlight = null;
     }
-    try {
-      await deps.deleteLocalRun(runDir);
-    } catch (error) {
-      app.log.error({ err: error, id }, "local delete failed");
-    }
-    inFlight = null;
   }
 
   async function loadJudgments(id: string): Promise<readonly Judgment[] | null> {
@@ -90,7 +90,9 @@ export const runsRoutes: FastifyPluginAsyncZod<RunsDeps> = async (app, deps) => 
       inFlight = null;
       throw error;
     }
-    reply.raw.once("close", () => void settle(id, target));
+    const start = (): void => void settle(id, target);
+    if (reply.raw.closed) start();
+    else reply.raw.once("close", start);
     return reply.code(202).send({ id, status: "running" });
   });
 

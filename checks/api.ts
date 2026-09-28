@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate as tick } from "node:timers/promises";
+
+import type { FastifyInstance } from "fastify";
 
 import { buildServer } from "../src/app/api.js";
 import type { RunOutcome, RunRow, RunsDeps } from "../src/app/routes/runs.js";
@@ -91,6 +96,9 @@ type Fake = {
   readonly archive: Map<string, string>;
   detonation: Deferred;
   settled: Deferred;
+  inserting: Deferred;
+  insertGate: Promise<void>;
+  uploadError: Error | null;
 };
 
 function fake(runsDir: string): Fake {
@@ -102,10 +110,15 @@ function fake(runsDir: string): Fake {
     archive: new Map(),
     detonation: deferred(),
     settled: deferred(),
+    inserting: deferred(),
+    insertGate: Promise.resolve(),
+    uploadError: null,
     deps: {
       runsDir,
       insertRun: async (id, target) => {
         state.calls.push(`insert ${id}`);
+        state.inserting.resolve();
+        await state.insertGate;
         state.inserted.push(target);
         state.rows.set(id, { id, status: "running" });
       },
@@ -114,15 +127,16 @@ function fake(runsDir: string): Fake {
         state.calls.push(`finish ${id} ${outcome.status}`);
         state.finished.push(outcome);
         state.rows.set(id, { id, status: outcome.status });
+        state.settled.resolve();
       },
       uploadRun: async (id, runDir) => {
         assert.equal(runDir, join(runsDir, id));
         state.calls.push(`upload ${id}`);
+        if (state.uploadError !== null) throw state.uploadError;
       },
       readArchive: async (id, name) => state.archive.get(`${id}/${name}`) ?? null,
       deleteLocalRun: async (runDir) => {
         state.calls.push(`delete ${runDir}`);
-        state.settled.resolve();
       },
       runDetonation: async (id, _target, runDir) => {
         assert.equal(runDir, join(runsDir, id));
@@ -132,6 +146,28 @@ function fake(runsDir: string): Fake {
     },
   };
   return state;
+}
+
+function reset(state: Fake): void {
+  state.calls.length = 0;
+  state.detonation = deferred();
+  state.settled = deferred();
+  state.inserting = deferred();
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (condition()) return;
+    await tick();
+  }
+  assert.fail("condition never held");
+}
+
+async function accept(app: FastifyInstance): Promise<string> {
+  const response = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  assert.equal(response.statusCode, 202);
+  await tick();
+  return idOf(response.payload);
 }
 
 function idOf(payload: string): string {
@@ -188,13 +224,17 @@ try {
   const missing = await app.inject({ method: "GET", url: `/runs/${crypto.randomUUID()}`, headers: auth });
   assert.equal(missing.statusCode, 404);
 
-  state.calls.length = 0;
-  state.detonation = deferred();
-  state.settled = deferred();
-  const second = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
-  assert.equal(second.statusCode, 202);
-  const failedId = idOf(second.payload);
+  reset(state);
+  const quietId = await accept(app);
+  state.detonation.resolve();
+  await state.settled.promise;
   await tick();
+  const quiet = await app.inject({ method: "GET", url: `/runs/${quietId}`, headers: auth });
+  assert.equal(quiet.statusCode, 200);
+  assert.deepEqual(JSON.parse(quiet.payload), { run: { id: quietId, status: "succeeded" }, judgments: null });
+
+  reset(state);
+  const failedId = await accept(app);
   mkdirSync(join(runsDir, failedId));
   state.detonation.reject(new Error("write EPIPE"));
   await state.settled.promise;
@@ -212,20 +252,52 @@ try {
   assert.equal(failed.statusCode, 200);
   assert.deepEqual(JSON.parse(failed.payload), { run: { id: failedId, status: "failed" }, judgments: null });
 
-  state.calls.length = 0;
-  state.detonation = deferred();
-  state.settled = deferred();
-  const third = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
-  const emptyId = idOf(third.payload);
-  await tick();
+  reset(state);
+  const emptyId = await accept(app);
   state.detonation.reject(new Error("image build failed"));
   await state.settled.promise;
+  await tick();
   assert.deepEqual(state.calls, [
     `insert ${emptyId}`,
     `detonate ${emptyId}`,
     `finish ${emptyId} failed`,
     `delete ${join(runsDir, emptyId)}`,
   ]);
+
+  reset(state);
+  state.uploadError = new Error("archive unavailable");
+  const keptId = await accept(app);
+  state.detonation.resolve();
+  await state.settled.promise;
+  await tick();
+  assert.deepEqual(state.calls, [`insert ${keptId}`, `detonate ${keptId}`, `upload ${keptId}`, `finish ${keptId} failed`]);
+  assert.deepEqual(state.finished.at(-1), { status: "failed", verdict: "incomplete" });
+  state.uploadError = null;
+
+  reset(state);
+  const gate = deferred();
+  state.insertGate = gate.promise;
+  await app.listen({ port: 0, host: "127.0.0.1" });
+  const address = app.server.address();
+  assert.ok(address !== null && typeof address === "object");
+  const connection = once(app.server, "connection");
+  const aborted = request({ host: "127.0.0.1", port: address.port, method: "POST", path: "/runs" });
+  aborted.setHeader("authorization", auth.authorization);
+  aborted.setHeader("content-type", "application/json");
+  aborted.on("error", () => {});
+  aborted.end(JSON.stringify(body));
+  const [socket] = (await connection) as [Socket];
+  await state.inserting.promise;
+  aborted.destroy();
+  await once(socket, "close");
+  gate.resolve();
+  await waitFor(() => state.calls.some((call) => call.startsWith("detonate ")));
+  state.detonation.resolve();
+  await state.settled.promise;
+  await tick();
+  state.insertGate = Promise.resolve();
+  const after = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  assert.equal(after.statusCode, 202);
 
   await app.close();
 } finally {
