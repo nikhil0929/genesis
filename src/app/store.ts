@@ -5,6 +5,7 @@ import type { Db } from "./db/client.js";
 import { runs } from "./db/schema.js";
 import { serverKey } from "./server-key.js";
 import { rollupVerdict } from "./verdict.js";
+import type { Verdict } from "./verdict.js";
 
 export type RunStart = {
   readonly id: string;
@@ -12,14 +13,24 @@ export type RunStart = {
   readonly startedAt: Date;
 };
 
-export type RunFinish = {
+export type RunOutcome =
+  | {
+      readonly status: "succeeded" | "failed";
+      readonly run: Run;
+      readonly judgments: readonly Judgment[] | null;
+    }
+  | { readonly status: "failed"; readonly run: null };
+
+export type RunFinish = RunOutcome & {
   readonly id: string;
-  readonly run: Run;
-  readonly judgments: readonly Judgment[] | null;
   readonly downloadUrl: string | null;
-  readonly status: "succeeded" | "failed";
   readonly endedAt: Date;
 };
+
+function outcomeColumns(outcome: RunOutcome): { mcpServerName: string | null; verdict: Verdict } {
+  if (outcome.run === null) return { mcpServerName: null, verdict: "incomplete" };
+  return { mcpServerName: outcome.run.startup.server_info.name, verdict: rollupVerdict(outcome.judgments) };
+}
 
 function packageColumns(target: Target): { packageName: string | null; packageVersion: string | null } {
   switch (target.source.kind) {
@@ -54,10 +65,9 @@ export async function finishRun(db: Db, finish: RunFinish): Promise<void> {
     .update(runs)
     .set({
       endedAt: finish.endedAt,
-      mcpServerName: finish.run.startup.server_info.name,
+      ...outcomeColumns(finish),
       downloadUrl: finish.downloadUrl,
       status: finish.status,
-      verdict: rollupVerdict(finish.judgments),
     })
     .where(and(eq(runs.id, finish.id), eq(runs.status, "running")))
     .returning({ id: runs.id });
