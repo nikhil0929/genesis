@@ -776,7 +776,7 @@ async function sealFlows(runDir: string, proxyContainer: string): Promise<readon
 export function resolveRunId(name: string, requested?: string): string {
   if (requested === undefined) return `${name}-${randomBytes(4).toString("hex")}`;
   if (requested === requested.toLowerCase() && runIdSchema.safeParse(requested).success) return requested;
-  throw new Error("invalid run id");
+  throw new Error(`invalid run id: ${requested}`);
 }
 
 export async function traceTarget(target: Target, requested?: string): Promise<TracedRun> {

@@ -10,7 +10,11 @@ process.stdout.write(`${accepted}\n`);
 const generated = resolveRunId("detfix");
 assert.match(generated, /^detfix-[0-9a-f]{8}$/);
 
-assert.throws(() => resolveRunId("detfix", "01234567-89AB-CDEF-0123-456789ABCDEF"));
-assert.throws(() => resolveRunId("detfix", ""));
-assert.throws(() => resolveRunId("detfix", "01234567-89ab-cdef/0123-456789abcdef"));
-assert.throws(() => resolveRunId("detfix", "01234567-89ab-cdef 0123-456789abcdef"));
+function rejected(requested: string): void {
+  assert.throws(() => resolveRunId("detfix", requested), { message: `invalid run id: ${requested}` });
+}
+
+rejected("01234567-89AB-CDEF-0123-456789ABCDEF");
+rejected("");
+rejected("01234567-89ab-cdef/0123-456789abcdef");
+rejected("01234567-89ab-cdef 0123-456789abcdef");
