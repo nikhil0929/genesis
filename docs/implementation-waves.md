@@ -76,7 +76,7 @@ Owns `targets/server-filesystem.toml`, that target's scenario, and `checks/` for
 
 Starts once `findings.json` has been produced by a real run and `report.ts` already renders a missing judgment. Parallel with the two target agents, because those agents do not edit `src/`.
 
-Owns `src/judge.ts` and `checks/` for build step 6. Writes `judgments.json`. Skips cleanly when `OPENROUTER_API_KEY` is absent.
+Owns `src/judge.ts` and `checks/` for build step 6. Writes `judgments.json`. Skips cleanly when `ANTHROPIC_API_KEY` is absent.
 
 ## Schedule
 

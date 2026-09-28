@@ -9,13 +9,10 @@ import type { Finding, Judgment, Run, ToolCallBundle } from "../src/model.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
+if (existsSync(join(root, ".env"))) process.loadEnvFile(join(root, ".env"));
+
 function envWithoutKey(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (name === "OPENROUTER_API_KEY" || value === undefined) continue;
-    env[name] = value;
-  }
-  return env;
+  return { ...process.env, ANTHROPIC_API_KEY: "" };
 }
 
 function cli(
@@ -75,6 +72,7 @@ function assertCitationsOnCall(run: Run, judgments: readonly Judgment[]): void {
   for (const judgment of judgments) {
     switch (judgment.kind) {
       case "invalid":
+        assert.fail(`call ${String(judgment.call_id)} judgment invalid: ${judgment.error}`);
         break;
       case "answer": {
         const call = run.tool_calls.find((item) => item.call_id === judgment.call_id);
@@ -155,7 +153,7 @@ assert.equal(existsSync(join(withoutKey, "judgments.json")), false);
 const skipped = detonate(["targets/detfix-allow.toml", "--no-judge"]);
 assertJudgeNotRun(skipped);
 
-const key = process.env.OPENROUTER_API_KEY;
+const key = process.env.ANTHROPIC_API_KEY;
 if (key === undefined || key.length === 0) {
   process.stderr.write("opinion assertions not run\n");
 } else {

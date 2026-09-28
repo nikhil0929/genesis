@@ -309,7 +309,7 @@ The target file is TOML. It names the target, its pinned version, the ecosystem 
 13. The static profile scans `source/` and the advertised tools and writes `static_profile.json`.
 14. Attribution builds windows from the transcript, assigns owners, places every event, runs the clock check, and writes `bundles.json`.
 15. The side-effect rules write `findings.json`.
-16. If `OPENROUTER_API_KEY` is set and no saved judgments exist, the judge writes `judgments.json`.
+16. If `ANTHROPIC_API_KEY` is set and no saved judgments exist, the judge writes `judgments.json`.
 17. The report writes `report.md`.
 
 Steps 12 through 17 are `mcpdet report <run-dir>`. `mcpdet detonate` calls the same code after step 11.
@@ -550,9 +550,9 @@ For each tool-call bundle, the judge sends one request. The request carries thes
 - The tool's source sites and the API hints for the files that hold them.
 - The arguments sent and the outcome.
 - Every finding in the bundle, with its rule, subject, link strength, `after_reply` flag, claim check, and evidence event ids.
-- A count of events by kind, so the judge knows what the bundle holds without every file read.
+- Every event in the bundle, with its id, pid, syscall, result, link, and parsed body.
 
-The judge never sees raw trace lines beyond the evidence events. That keeps each request small and keeps the judge's attention on what the rules named [inferred].
+**Decision.** The judge sees every parsed event in the bundle, and the answer schema restricts each citation to those event ids [decision]. An earlier brief sent only event counts. A call with no findings then gave the judge no id it could cite, and 5 of 12 `mcp-server-git` calls came back `invalid` [measured]. The judge still never sees raw trace lines. The system prompt says the source sites and hints cover the whole file, so the opinion rests on the call's events [decision].
 
 The judge must return one JSON object with these fields:
 
@@ -566,11 +566,11 @@ The judge must return one JSON object with these fields:
 
 **Decision.** The judge never outputs a malicious score or a clean or malicious label [decision]. The brief does not ask for a classifier, and the analyst still makes the final call [brief].
 
-The judge calls the OpenRouter chat completions endpoint at `https://openrouter.ai/api/v1/chat/completions` with temperature 0, and asks for a JSON schema through `response_format` ([OpenRouter chat completion API](https://openrouter.ai/docs/api-reference/chat-completion)). It uses Node's built-in `fetch`. The model slug lives in one setting, and `judgments.json` records the model slug and the time of each answer.
+The judge calls the Anthropic Messages API through the official `@anthropic-ai/sdk` package, using `claude-sonnet-5`. It asks for a JSON schema through `output_config.format`. Sonnet 5 rejects sampling parameters, so the request sets no temperature. The model ID lives in one setting, and `judgments.json` records the model ID and the time of each answer.
 
-**Decision.** The judge reads the key from `OPENROUTER_API_KEY`, and a run without the key still completes [decision]. The report then says "judge not run" in each tool-call section, so every earlier slice works with no network access from the host and no secret [inferred].
+**Decision.** The judge reads the key from `ANTHROPIC_API_KEY`, and a run without the key still completes [decision]. The CLI loads `.env` from the working directory at startup, and a variable already set in the shell wins [decision]. The report then says "judge not run" in each tool-call section, so every earlier slice works with no network access from the host and no secret [inferred].
 
-The judge sends the server's tool descriptions and source snippets to OpenRouter. The run header says so. `mcpdet detonate --no-judge` skips the judge, for a local source folder that must not leave the machine [decision].
+The judge sends the server's tool descriptions, source snippets, and each event's parsed body to Anthropic. The run header says so. `mcpdet detonate --no-judge` skips the judge, for a local source folder that must not leave the machine [decision].
 
 ## Static profile
 
@@ -670,7 +670,7 @@ Each slice ends in something that runs and a check that passes or fails. Each ch
 3. **Static profile and report.** Add the static profile, the report, and `mcpdet report`. The check asserts that `mcpdet report` rebuilds `bundles.json` and `report.md` byte for byte, that `report.md` has one section per call, and that the `word_count` network finding shows no interface mention and points to the fixture's source line.
 4. **`mcp-server-git`.** Add `targets/mcp-server-git.toml` with a setup step that creates `/work/repo` with three commits. The scenario calls `git_status`, `git_log`, `git_diff_unstaged`, `git_add`, `git_commit`, and `git_show` on `/work/repo`, and probes cover the rest. The check asserts that each scenario call's bundle holds an exec of `git` whose argv matches the tool, with strong links, and that `git_commit` has `file_modified` under `/work/repo/.git`. It also asserts that the static profile shows no spawn hint in the server's source and lists `gitpython`, and that the unmatched bucket has no orphan events.
 5. **`server-filesystem`.** Add `targets/server-filesystem.toml` with `/work/files` as the allowed directory. The scenario calls `list_allowed_directories`, `read_text_file` on `/work/files/a.txt`, `write_file` on `/work/files/new.txt`, and `read_text_file` on `/home/detonee/.aws/credentials`. The check asserts that the `write_file` bundle holds `file_modified` for `new.txt` from a thread mapped to the Node process, with an `overlap` link. It also asserts that the out-of-bounds read returns an error outcome and shows no successful read open of the decoy path. Any stat of that path appears as `credential_access` with its result.
-6. **LLM judge.** Add the judge and its report block. Run it on the `detfix` run from slice 3. The check asserts that `word_count` gets `does_not_match` with at least one mismatch citing its `credential_access` or `network_attempt` evidence, and that `echo` gets `matches`. It also asserts that every cited event id exists in its bundle. A second `mcpdet report` without `--rejudge` must rebuild `report.md` byte for byte. A run with no `OPENROUTER_API_KEY` must complete and print "judge not run". The check tests only the two clear cases, because an LLM's answer on an ambiguous call can change between runs [inferred].
+6. **LLM judge.** Add the judge and its report block. Run it on the `detfix` run from slice 3. The check asserts that `word_count` gets `does_not_match` with at least one mismatch citing its `credential_access` or `network_attempt` evidence, and that `echo` gets `matches`. It also asserts that every cited event id exists in its bundle. A second `mcpdet report` without `--rejudge` must rebuild `report.md` byte for byte. A run with no `ANTHROPIC_API_KEY` must complete and print "judge not run". The check tests only the two clear cases, because an LLM's answer on an ambiguous call can change between runs [inferred].
 
 ## Where things live
 
@@ -716,7 +716,7 @@ These follow once all six slices pass, in this order:
 - [MCP transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports), [MCP lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle), and [MCP tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), version 2025-11-25. The transports page was fetched on 26 September 2026 to confirm newline-delimited messages.
 - [mcp-server-git README](https://github.com/modelcontextprotocol/servers/tree/main/src/git), its [pyproject.toml](https://github.com/modelcontextprotocol/servers/blob/main/src/git/pyproject.toml), and its [server.py](https://github.com/modelcontextprotocol/servers/blob/main/src/git/src/mcp_server_git/server.py), fetched 26 September 2026. The PyPI JSON API reported 2026.8.18 as the latest version.
 - [server-filesystem README](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem), fetched 26 September 2026. The npm registry reported 2026.8.31 as the latest version, with the `mcp-server-filesystem` binary.
-- [OpenRouter chat completion API](https://openrouter.ai/docs/api-reference/chat-completion), fetched 26 September 2026, for the endpoint URL and the `response_format` JSON schema option.
+- [Anthropic structured outputs](https://platform.claude.com/docs/en/build-with-claude/structured-outputs), for the `output_config.format` JSON schema option.
 - [libuv linux.c](https://github.com/libuv/libuv/blob/v1.x/src/unix/linux.c) and [Node.js commit 42e659c](https://github.com/nodejs/node/commit/42e659cb9d9425f76dbe9b57a437005508c0933d) for `UV_USE_IO_URING`.
 - [time_namespaces(7)](https://man7.org/linux/man-pages/man7/time_namespaces.7.html), fetched 26 September 2026. It states that time namespaces do not virtualize `CLOCK_REALTIME`.
 - [pid_namespaces(7)](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html), fetched 26 September 2026. It states that when the init process of a PID namespace terminates, the kernel sends SIGKILL to every process in the namespace.

@@ -1,6 +1,8 @@
 import { existsSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import Anthropic from "@anthropic-ai/sdk";
+
 import { parseJudgeAnswer, parseJudgments } from "./model.js";
 import type {
   EventId,
@@ -14,16 +16,14 @@ import type {
 
 export type JudgeMode = "skip" | "if_absent" | "again";
 
-const JUDGE_MODEL = "openai/gpt-4.1-mini";
+const JUDGE_MODEL = "claude-sonnet-5";
 
 const JUDGE_SYSTEM =
-  "The question is whether what the call did matches what the tool claims. Citations must be event ids from the brief. The answer is not a maliciousness score.";
+  "The question is whether what this call did matches what the tool claims. Base the opinion on this call's events. The sites and hints describe the whole source file that defines the tool, including code other tools use, so they explain events but are not evidence of what this call did. Each mismatch cites the event_id values of the events that show it. The answer is not a maliciousness score.";
 
-const JUDGE_RESPONSE_FORMAT = {
-  type: "json_schema",
-  json_schema: {
-    name: "judge_answer",
-    strict: true,
+function outputFormat(citable: ReadonlySet<EventId>) {
+  return {
+    type: "json_schema",
     schema: {
       type: "object",
       additionalProperties: false,
@@ -35,7 +35,7 @@ const JUDGE_RESPONSE_FORMAT = {
             type: "object",
             additionalProperties: false,
             properties: {
-              event_ids: { type: "array", items: { type: "string" } },
+              event_ids: { type: "array", items: { type: "string", enum: [...citable] } },
               explanation: { type: "string" },
             },
             required: ["event_ids", "explanation"],
@@ -45,8 +45,8 @@ const JUDGE_RESPONSE_FORMAT = {
       },
       required: ["opinion", "mismatches", "summary"],
     },
-  },
-} as const;
+  } as const;
+}
 
 type JudgeBrief = {
   readonly call: ToolCallBundle;
@@ -75,26 +75,6 @@ function advertisedTool(call: ToolCallBundle): ToolDefinition | null {
   }
 }
 
-function eventCounts(call: ToolCallBundle): { data: number; file: number; process: number; net: number; other: number } {
-  const counts = { data: 0, file: 0, process: 0, net: 0, other: 0 };
-  for (const entry of call.events) {
-    switch (entry.event.body.kind) {
-      case "data":
-      case "file":
-      case "process":
-      case "net":
-      case "other":
-        counts[entry.event.body.kind] += 1;
-        break;
-      default: {
-        const unreachable: never = entry.event.body;
-        throw new Error(String(unreachable));
-      }
-    }
-  }
-  return counts;
-}
-
 function promptFor(brief: JudgeBrief): string {
   const tool = advertisedTool(brief.call);
   const text = brief.profile.tool_texts.find((item) => item.tool === brief.call.tool);
@@ -114,61 +94,52 @@ function promptFor(brief: JudgeBrief): string {
     arguments: brief.call.arguments,
     outcome: brief.call.outcome,
     findings: callFindings,
-    event_counts: eventCounts(brief.call),
+    events: brief.call.events.map((entry) => ({
+      event_id: entry.event.event_id,
+      pid: entry.event.pid,
+      syscall: entry.event.syscall,
+      result: entry.event.result,
+      link: entry.link,
+      body: entry.event.body,
+    })),
   });
 }
 
-function record(value: unknown): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
-function assistantContent(body: string): string {
-  const root = record(JSON.parse(body));
-  const choices = root?.choices;
-  if (!Array.isArray(choices) || choices.length === 0) throw new Error("completion has no choices");
-  const message = record(record(choices[0])?.message);
-  const content = message?.content;
-  if (typeof content !== "string") throw new Error("assistant content is not a string");
-  return content;
-}
-
-async function requestJudgment(brief: JudgeBrief, citable: ReadonlySet<EventId>): Promise<ModelReply> {
+async function requestJudgment(
+  client: Anthropic,
+  brief: JudgeBrief,
+  citable: ReadonlySet<EventId>,
+): Promise<ModelReply> {
   let raw_text = "";
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY ?? ""}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: JUDGE_MODEL,
-        temperature: 0,
-        messages: [
-          { role: "system", content: JUDGE_SYSTEM },
-          { role: "user", content: promptFor(brief) },
-        ],
-        response_format: JUDGE_RESPONSE_FORMAT,
-      }),
+    const response = await client.messages.create({
+      model: JUDGE_MODEL,
+      max_tokens: 16000,
+      system: JUDGE_SYSTEM,
+      messages: [{ role: "user", content: promptFor(brief) }],
+      output_config: { format: outputFormat(citable) },
     });
-    raw_text = await response.text();
-    if (!response.ok) return { kind: "invalid", raw_text, error: `HTTP ${String(response.status)}` };
-    const content = assistantContent(raw_text);
-    raw_text = content;
-    return { kind: "answer", answer: parseJudgeAnswer(content, "judge", citable) };
+    raw_text = response.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+    if (response.stop_reason !== "end_turn") {
+      return { kind: "invalid", raw_text, error: `stop_reason ${String(response.stop_reason)}` };
+    }
+    return { kind: "answer", answer: parseJudgeAnswer(raw_text, "judge", citable) };
   } catch (error) {
     return { kind: "invalid", raw_text, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-async function askModel(brief: JudgeBrief, citable: ReadonlySet<EventId>): Promise<ModelReply> {
-  const first = await requestJudgment(brief, citable);
+async function askModel(
+  client: Anthropic,
+  brief: JudgeBrief,
+  citable: ReadonlySet<EventId>,
+): Promise<ModelReply> {
+  const first = await requestJudgment(client, brief, citable);
   switch (first.kind) {
     case "answer":
       return first;
     case "invalid":
-      return requestJudgment(brief, citable);
+      return requestJudgment(client, brief, citable);
     default: {
       const unreachable: never = first;
       throw new Error(String(unreachable));
@@ -204,11 +175,12 @@ export async function judgeRun(
       throw new Error(String(unreachable));
     }
   }
-  const key = process.env.OPENROUTER_API_KEY;
+  const key = process.env.ANTHROPIC_API_KEY;
   if (key === undefined || key.length === 0) return;
+  const client = new Anthropic({ apiKey: key });
   const judgments: unknown[] = [];
   for (const call of run.tool_calls) {
-    const reply = await askModel({ call, profile, findings }, citableIds(call));
+    const reply = await askModel(client, { call, profile, findings }, citableIds(call));
     const answered_at_us = Date.now() * 1000;
     switch (reply.kind) {
       case "answer":

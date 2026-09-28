@@ -1,4 +1,4 @@
-import { copyFileSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -58,6 +58,7 @@ function fail(error: unknown): void {
 
 const entry = process.argv[1];
 if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
+  if (existsSync(".env")) process.loadEnvFile(".env");
   let command: Command;
   try {
     command = parseCommand(process.argv.slice(2));
