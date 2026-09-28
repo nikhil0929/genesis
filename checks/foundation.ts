@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseRun } from "../src/model.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
@@ -44,13 +47,9 @@ function sourcePath(value: unknown): string {
 }
 
 try {
-  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", targetPath, "--no-judge"], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 900_000,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout || result.error?.message);
-  const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
+  const id = randomUUID();
+  await runDetonation(loadTarget(targetPath), "skip", id);
+  const runDir = scratchDir(id);
   assert.equal(existsSync(join(runDir, "raw", "source", "pyproject.toml")), true);
   const host: unknown = JSON.parse(readFileSync(join(runDir, "raw", "host.json"), "utf8"));
   assert.equal(sourcePath(host), "registry/pypi/mcp-server-git/2026.8.18");

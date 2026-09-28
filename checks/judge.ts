@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseFindings, parseJudgments, parseRun } from "../src/model.js";
 import type { Finding, Judgment, Run, ToolCallBundle } from "../src/model.js";
 
@@ -11,19 +14,11 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 
 if (existsSync(join(root, ".env"))) process.loadEnvFile(join(root, ".env"));
 
-function envWithoutKey(): NodeJS.ProcessEnv {
-  return { ...process.env, ANTHROPIC_API_KEY: "" };
-}
-
-function cli(
-  args: readonly string[],
-  env?: NodeJS.ProcessEnv,
-): { status: number | null; stdout: string; stderr: string; error: string } {
+function cli(args: readonly string[]): { status: number | null; stdout: string; stderr: string; error: string } {
   const result = spawnSync(process.execPath, ["dist/src/app/cli.js", ...args], {
     cwd: root,
     encoding: "utf8",
     timeout: 900_000,
-    env,
   });
   return {
     status: result.status,
@@ -33,12 +28,23 @@ function cli(
   };
 }
 
-function detonate(args: readonly string[], env?: NodeJS.ProcessEnv): string {
-  const result = cli(["detonate", ...args], env);
-  assert.equal(result.status, 0, result.error || result.stderr || result.stdout);
-  const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
+async function detonate(target: string, mode: "skip" | "if_absent"): Promise<string> {
+  const id = randomUUID();
+  await runDetonation(loadTarget(join(root, target)), mode, id);
+  const runDir = scratchDir(id);
   assert.ok(existsSync(join(runDir, "report.md")), runDir);
   return runDir;
+}
+
+async function detonateWithoutKey(target: string): Promise<string> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "";
+  try {
+    return await detonate(target, "if_absent");
+  } finally {
+    if (key === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = key;
+  }
 }
 
 function assertJudgeNotRun(runDir: string): void {
@@ -93,8 +99,8 @@ function assertCitationsOnCall(run: Run, judgments: readonly Judgment[]): void {
   }
 }
 
-function assertOpinions(): void {
-  const runDir = detonate(["targets/detfix-allow.toml"]);
+async function assertOpinions(): Promise<void> {
+  const runDir = await detonate("targets/detfix-allow.toml", "if_absent");
   const bundlesPath = join(runDir, "bundles.json");
   const judgmentsPath = join(runDir, "judgments.json");
   const findingsPath = join(runDir, "findings.json");
@@ -146,16 +152,16 @@ function assertOpinions(): void {
   assert.deepEqual(readFileSync(join(runDir, "report.md")), before);
 }
 
-const withoutKey = detonate(["targets/detfix-allow.toml"], envWithoutKey());
+const withoutKey = await detonateWithoutKey("targets/detfix-allow.toml");
 assertJudgeNotRun(withoutKey);
 assert.equal(existsSync(join(withoutKey, "judgments.json")), false);
 
-const skipped = detonate(["targets/detfix-allow.toml", "--no-judge"]);
+const skipped = await detonate("targets/detfix-allow.toml", "skip");
 assertJudgeNotRun(skipped);
 
 const key = process.env.ANTHROPIC_API_KEY;
 if (key === undefined || key.length === 0) {
   process.stderr.write("opinion assertions not run\n");
 } else {
-  assertOpinions();
+  await assertOpinions();
 }

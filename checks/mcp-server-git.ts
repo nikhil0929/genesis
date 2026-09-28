@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseFindings, parseRun } from "../src/model.js";
 import { profileSources } from "../src/engine/static-profile.js";
 import type { Finding, Run, ToolCallBundle } from "../src/model.js";
@@ -61,14 +63,9 @@ function gitCommitWroteDotGit(findings: readonly Finding[], call: ToolCallBundle
 }
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const result = spawnSync(
-  process.execPath,
-  ["dist/src/app/cli.js", "detonate", "targets/mcp-server-git.toml", "--no-judge"],
-  { cwd: root, encoding: "utf8", timeout: 900_000 },
-);
-assert.equal(result.status, 0, result.stderr || result.stdout);
-const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
-assert.ok(runDir.startsWith(join(root, "runs")), runDir);
+const id = randomUUID();
+await runDetonation(loadTarget(join(root, "targets/mcp-server-git.toml")), "skip", id);
+const runDir = scratchDir(id);
 
 const bundlesPath = join(runDir, "bundles.json");
 const findingsPath = join(runDir, "findings.json");

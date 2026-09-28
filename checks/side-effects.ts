@@ -1,22 +1,18 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseFindings, parseRun } from "../src/model.js";
 import type { Event, Finding, Run, ToolCallBundle } from "../src/model.js";
 
-function detonate(target: string): string {
-  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", target], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 900_000,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
-  assert.ok(runDir.startsWith(join(root, "runs")), runDir);
-  return runDir;
+async function detonate(target: string): Promise<string> {
+  const id = randomUUID();
+  await runDetonation(loadTarget(join(root, target)), "if_absent", id);
+  return scratchDir(id);
 }
 
 function loadRun(runDir: string): { readonly run: Run; readonly findings: readonly Finding[] } {
@@ -73,7 +69,7 @@ function secretOf(run: Run): string {
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
-const allowDir = detonate("targets/detfix-allow.toml");
+const allowDir = await detonate("targets/detfix-allow.toml");
 const allow = loadRun(allowDir);
 const secret = secretOf(allow.run);
 const wordCall = callNamed(allow.run.tool_calls, "word_count");
@@ -165,7 +161,7 @@ assert.ok(
   "nothing wrote /tmp/plugin_x.mjs before it was loaded",
 );
 
-const blockDir = detonate("targets/detfix.toml");
+const blockDir = await detonate("targets/detfix.toml");
 const block = loadRun(blockDir);
 assert.equal(block.run.network.kind, "block");
 for (const event of runEvents(block.run)) {

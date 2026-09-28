@@ -1,24 +1,21 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadTarget, scratchDir } from "../src/app/cli.js";
+import { runDetonation } from "../src/app/detonate.js";
 import { parseFindings, parseRun } from "../src/model.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const derived = ["bundles.json", "findings.json", "report.md"];
 
-function detonate(target: string): string {
-  const result = spawnSync(process.execPath, ["dist/src/app/cli.js", "detonate", target], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 900_000,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const runDir = result.stdout.trim().split("\n").at(-1) ?? "";
-  assert.ok(runDir.startsWith(`${join(root, "runs")}/`), runDir);
-  return runDir;
+async function detonate(target: string): Promise<string> {
+  const id = randomUUID();
+  await runDetonation(loadTarget(join(root, target)), "if_absent", id);
+  return scratchDir(id);
 }
 
 function report(runDir: string): void {
@@ -42,7 +39,7 @@ function toolSection(reportText: string, tool: string): string {
   return lines.slice(start, next === -1 ? lines.length : next).join("\n");
 }
 
-const runDir = detonate("targets/detfix-allow.toml");
+const runDir = await detonate("targets/detfix-allow.toml");
 const topLevel = readdirSync(runDir).filter((name) => name !== "judgments.json").sort();
 assert.deepEqual(topLevel, ["bundles.json", "findings.json", "raw", "report.md"]);
 assert.deepEqual(readdirSync(join(runDir, "raw")).sort(), [
