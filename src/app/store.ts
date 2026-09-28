@@ -29,7 +29,10 @@ export type RunFinish = RunOutcome & {
 
 function outcomeColumns(outcome: RunOutcome): { mcpServerName: string | null; verdict: Verdict } {
   if (outcome.run === null) return { mcpServerName: null, verdict: "incomplete" };
-  return { mcpServerName: outcome.run.startup.server_info.name, verdict: rollupVerdict(outcome.judgments) };
+  return {
+    mcpServerName: outcome.run.startup.server_info.name.replaceAll("\0", "\uFFFD"),
+    verdict: rollupVerdict(outcome.judgments),
+  };
 }
 
 function packageColumns(target: Target): { packageName: string | null; packageVersion: string | null } {

@@ -50,7 +50,7 @@ function toolCall(callId: number, sentUs: number): unknown {
   };
 }
 
-function runFor(source: Target): Run {
+function runFor(source: Target, serverName = "detfix-server"): Run {
   const document = {
     run_id: `detfix-${randomBytes(4).toString("hex")}`,
     target: { name: source.name, source: source.source, image_id: "sha256:abc", command: source.command },
@@ -72,7 +72,7 @@ function runFor(source: Target): Run {
       kind: "startup",
       window: { start_us: 0, duration_us: 1_000 },
       messages: [],
-      server_info: { name: "detfix-server", version: "1.0.0", protocol_version: "2025-11-25", capabilities: {} },
+      server_info: { name: serverName, version: "1.0.0", protocol_version: "2025-11-25", capabilities: {} },
       advertised_tools: [],
       events: [],
     },
@@ -236,6 +236,21 @@ async function checkUnjudgedAndCrashed(db: Db): Promise<void> {
   assert.equal(partial.mcpServerName, null);
   assert.equal(partial.downloadUrl, downloadUrl);
   assert.ok(partial.endedAt instanceof Date);
+
+  const hostile = randomUUID();
+  await insertRun(db, { id: hostile, target: registryTarget, startedAt: new Date() });
+  const nulRun = runFor(registryTarget, "evil\0server");
+  await finishRun(db, {
+    id: hostile,
+    run: nulRun,
+    judgments: judgments(nulRun, ["matches", "matches"]),
+    downloadUrl: null,
+    status: "succeeded",
+    endedAt: new Date(),
+  });
+  const named = await rowOf(db, hostile);
+  assert.equal(named.status, "succeeded");
+  assert.equal(named.mcpServerName, "evil\uFFFDserver");
 }
 
 function violatedCheck(error: unknown): unknown {
