@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,9 +49,9 @@ function toolCall(callId: number, sentUs: number): unknown {
   };
 }
 
-function runFor(runId: string, source: Target): Run {
+function runFor(source: Target): Run {
   const document = {
-    run_id: runId,
+    run_id: `detfix-${randomBytes(4).toString("hex")}`,
     target: { name: source.name, source: source.source, image_id: "sha256:abc", command: source.command },
     network: { kind: "block" },
     canaries: [],
@@ -113,7 +113,7 @@ function checkServerKey(): void {
 }
 
 function checkVerdict(): void {
-  const run = runFor(randomUUID(), registryTarget);
+  const run = runFor(registryTarget);
   assert.equal(rollupVerdict(null), "incomplete");
   assert.equal(rollupVerdict([]), "pass");
   assert.equal(rollupVerdict(judgments(run, ["matches", "matches"])), "pass");
@@ -167,10 +167,11 @@ async function checkInsertAndFinish(db: Db): Promise<void> {
     verdict: null,
   });
 
-  const run = runFor(id, registryTarget);
+  const run = runFor(registryTarget);
   const endedAt = new Date("2026-09-28T05:01:00.000Z");
   const downloadUrl = `https://runs.example/${id}.tar.gz`;
   await finishRun(db, {
+    id,
     run,
     judgments: judgments(run, ["matches", "matches"]),
     downloadUrl,
@@ -186,14 +187,13 @@ async function checkInsertAndFinish(db: Db): Promise<void> {
   assert.deepEqual(finished.startedAt, startedAt);
 
   await assert.rejects(
-    finishRun(db, { run, judgments: null, downloadUrl: null, status: "failed", endedAt }),
+    finishRun(db, { id, run, judgments: null, downloadUrl: null, status: "failed", endedAt }),
     /has no running row to finish/,
   );
   assert.equal((await rowOf(db, id)).verdict, "pass");
 
-  const missing = runFor(randomUUID(), registryTarget);
   await assert.rejects(
-    finishRun(db, { run: missing, judgments: null, downloadUrl: null, status: "failed", endedAt }),
+    finishRun(db, { id: run.run_id, run, judgments: null, downloadUrl: null, status: "failed", endedAt }),
     /has no running row to finish/,
   );
 }
@@ -207,8 +207,9 @@ async function checkLocalWithoutDownload(db: Db): Promise<void> {
   assert.equal(inserted.packageName, null);
   assert.equal(inserted.packageVersion, null);
 
-  const run = runFor(id, localTarget);
+  const run = runFor(localTarget);
   await finishRun(db, {
+    id,
     run,
     judgments: judgments(run, ["unclear", "does_not_match"]),
     downloadUrl: null,
@@ -270,7 +271,9 @@ async function checkIllegalRows(db: Db): Promise<void> {
   await insert({ ...legal, id: "'local'", source_kind: "'local'", package_name: "null", package_version: "null" });
   await insert({ ...legal, id: "'done'", status: "'succeeded'", ended_at: "now()", verdict: "'incomplete'" });
 
-  const indexes = await db.execute(sql`select indexdef from pg_indexes where indexname = 'runs_server_key'`);
+  const indexes = await db.execute(
+    sql`select indexdef from pg_indexes where schemaname = current_schema() and indexname = 'runs_server_key'`,
+  );
   assert.equal(indexes.rows.length, 1);
   assert.match(String(indexes.rows[0]?.["indexdef"]), /\(server_key\)$/);
 }

@@ -13,6 +13,7 @@ export type RunStart = {
 };
 
 export type RunFinish = {
+  readonly id: string;
   readonly run: Run;
   readonly judgments: readonly Judgment[] | null;
   readonly downloadUrl: string | null;
@@ -58,7 +59,7 @@ export async function finishRun(db: Db, finish: RunFinish): Promise<void> {
       status: finish.status,
       verdict: rollupVerdict(finish.judgments),
     })
-    .where(and(eq(runs.id, finish.run.run_id), eq(runs.status, "running")))
+    .where(and(eq(runs.id, finish.id), eq(runs.status, "running")))
     .returning({ id: runs.id });
-  if (updated.length !== 1) throw new Error(`run ${finish.run.run_id} has no running row to finish`);
+  if (updated.length !== 1) throw new Error(`run ${finish.id} has no running row to finish`);
 }
