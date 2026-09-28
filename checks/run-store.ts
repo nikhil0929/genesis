@@ -281,17 +281,17 @@ async function checkIllegalRows(db: Db): Promise<void> {
 async function checkStore(url: string): Promise<void> {
   const schema = `run_store_${randomUUID().replaceAll("-", "")}`;
   const admin = openDb(url);
-  await admin.execute(sql.raw(`create schema ${schema}`));
-  const db = openDb(withSearchPath(url, schema));
+  await admin.db.execute(sql.raw(`create schema ${schema}`));
+  const scoped = openDb(withSearchPath(url, schema));
   try {
-    for (const statement of migrationStatements()) await db.execute(sql.raw(statement));
-    await checkInsertAndFinish(db);
-    await checkLocalWithoutDownload(db);
-    await checkIllegalRows(db);
+    for (const statement of migrationStatements()) await scoped.db.execute(sql.raw(statement));
+    await checkInsertAndFinish(scoped.db);
+    await checkLocalWithoutDownload(scoped.db);
+    await checkIllegalRows(scoped.db);
   } finally {
-    await db.$client.end();
-    await admin.execute(sql.raw(`drop schema ${schema} cascade`));
-    await admin.$client.end();
+    await scoped.close();
+    await admin.db.execute(sql.raw(`drop schema ${schema} cascade`));
+    await admin.close();
   }
 }
 
