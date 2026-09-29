@@ -2,7 +2,21 @@
 
 ## Quickstart
 
-Fill in a `.env` file with the variables listed under [What you have to configure](#what-you-have-to-configure), then run:
+For local development, run one script. It needs Docker and Node 24:
+
+```bash
+./scripts/dev.sh
+```
+
+The script:
+
+- starts Postgres and a MinIO-compatible S3 server in Docker, and creates the bucket;
+- creates `.env`, or fills in the missing keys of an existing one. Other lines stay as they are;
+- installs, builds, and runs the migrations, then starts the server.
+
+Other commands: `./scripts/dev.sh setup` does everything except start the server, `stop` stops the containers, and `reset` deletes their data. MinIO's own images are gone from Docker Hub and Quay, so the script uses `pgsty/silo`, a drop-in MinIO fork.
+
+To point at your own Postgres and S3 instead, fill in a `.env` file with the variables listed under [What you have to configure](#what-you-have-to-configure), then run:
 
 ```bash
 npm install
@@ -10,7 +24,7 @@ npx drizzle-kit migrate   # create the runs table
 node dist/src/app/cli.js serve
 ```
 
-The server listens on `127.0.0.1:8787`. Both endpoints need an `Authorization: Bearer $MCPDET_API_TOKEN` header.
+The server listens on `127.0.0.1:8787`. It has no authentication, so keep it bound to localhost.
 
 - `POST /runs` takes a target as JSON (the same fields as a file in `targets/`) and starts a run. It returns `{ "id", "status": "running" }`.
 - `GET /runs/:id` returns the run's status, its verdict, and the judge results once the run is done.
@@ -34,7 +48,7 @@ GET /runs/:id ◄── reads the row + fetches judgments.json from S3
 ```
 
 - **Code layout:** `src/engine/` is the original detonation logic, just moved into its own folder. `src/app/` is the new backend layer.
-- **The API (`src/app/api.ts`, `src/app/routes/runs.ts`)** has two endpoints, and every request needs a bearer token.
+- **The API (`src/app/api.ts`, `src/app/routes/runs.ts`)** has two endpoints.
   - `POST /runs` takes a target, returns a run ID straight away, and runs the detonation in the background. It allows one run at a time; a second request while one is going gets a `409` error.
   - `GET /runs/:id` returns the run's status and verdict, plus the judge results once the run is done.
 - **Postgres (`src/app/db/`)** holds one `runs` table: ID, target and package names, start and end times, status (`running`, `succeeded`, `failed`) and verdict (`pass`, `fail`, `incomplete`). It's only the small facts you look up.
@@ -48,7 +62,6 @@ The CLI reads a `.env` file from the repository root if there is one. It needs:
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Postgres connection string (required) |
-| `MCPDET_API_TOKEN` | the bearer token API callers must send (required for `serve`) |
 | `MCPDET_S3_BUCKET` | bucket name (required) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | normal AWS credentials |
 | `AWS_REGION` | optional, defaults to `us-east-1` |

@@ -13,10 +13,6 @@ import { buildServer } from "../src/app/api.js";
 import type { RunOutcome, RunRow, RunsDeps } from "../src/app/routes/runs.js";
 import type { Target } from "../src/model.js";
 
-const TOKEN = "check-token";
-process.env["MCPDET_API_TOKEN"] = TOKEN;
-const auth = { authorization: `Bearer ${TOKEN}` };
-
 const body = {
   name: "detfix",
   source: { kind: "local", ecosystem: "npm", path: "./fixtures/../fixtures/detfix" },
@@ -167,7 +163,7 @@ async function waitFor(condition: () => boolean): Promise<void> {
 }
 
 async function accept(app: FastifyInstance): Promise<string> {
-  const response = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  const response = await app.inject({ method: "POST", url: "/runs", payload: body });
   assert.equal(response.statusCode, 202);
   await tick();
   return idOf(response.payload);
@@ -186,18 +182,11 @@ try {
   const state = fake();
   const app = await buildServer(state.deps);
 
-  for (const headers of [{}, { authorization: "Bearer wrong" }, { authorization: `Basic ${TOKEN}` }]) {
-    const denied = await app.inject({ method: "POST", url: "/runs", headers, payload: body });
-    assert.equal(denied.statusCode, 401);
-  }
-  assert.equal((await app.inject({ method: "GET", url: `/runs/${crypto.randomUUID()}` })).statusCode, 401);
-  assert.deepEqual(state.calls, []);
-
-  const invalid = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: { name: "detfix" } });
+  const invalid = await app.inject({ method: "POST", url: "/runs", payload: { name: "detfix" } });
   assert.equal(invalid.statusCode, 400);
   assert.deepEqual(state.calls, []);
 
-  const accepted = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  const accepted = await app.inject({ method: "POST", url: "/runs", payload: body });
   assert.equal(accepted.statusCode, 202);
   const id = idOf(accepted.payload);
   assert.deepEqual(JSON.parse(accepted.payload), { id, status: "running" });
@@ -206,12 +195,12 @@ try {
   assert.deepEqual(state.calls, [`insert ${id}`, `detonate ${id}`]);
   assert.deepEqual(state.finished, []);
 
-  const busy = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  const busy = await app.inject({ method: "POST", url: "/runs", payload: body });
   assert.equal(busy.statusCode, 409);
   assert.equal(idOf(busy.payload), id);
   assert.match(JSON.parse(busy.payload).error, new RegExp(id));
 
-  const running = await app.inject({ method: "GET", url: `/runs/${id}`, headers: auth });
+  const running = await app.inject({ method: "GET", url: `/runs/${id}` });
   assert.equal(running.statusCode, 200);
   assert.deepEqual(JSON.parse(running.payload), { run: { id, status: "running", verdict: null }, judgments: null });
 
@@ -222,11 +211,11 @@ try {
   await tick();
   assert.deepEqual(state.calls.slice(2), [`upload ${id}`, `finish ${id} succeeded`, `delete ${resolve("runs", id)}`]);
 
-  const finished = await app.inject({ method: "GET", url: `/runs/${id}`, headers: auth });
+  const finished = await app.inject({ method: "GET", url: `/runs/${id}` });
   assert.equal(finished.statusCode, 200);
   assert.deepEqual(JSON.parse(finished.payload), { run: { id, status: "succeeded", verdict: "clean" }, judgments });
 
-  const missing = await app.inject({ method: "GET", url: `/runs/${crypto.randomUUID()}`, headers: auth });
+  const missing = await app.inject({ method: "GET", url: `/runs/${crypto.randomUUID()}` });
   assert.equal(missing.statusCode, 404);
 
   reset(state);
@@ -234,7 +223,7 @@ try {
   state.detonation.resolve();
   await state.settled.promise;
   await tick();
-  const quiet = await app.inject({ method: "GET", url: `/runs/${quietId}`, headers: auth });
+  const quiet = await app.inject({ method: "GET", url: `/runs/${quietId}` });
   assert.equal(quiet.statusCode, 200);
   assert.deepEqual(JSON.parse(quiet.payload), { run: { id: quietId, status: "succeeded", verdict: "clean" }, judgments: null });
 
@@ -253,7 +242,7 @@ try {
   ]);
   assert.deepEqual(state.finished.at(-1), { status: "failed", verdict: "incomplete" });
 
-  const failed = await app.inject({ method: "GET", url: `/runs/${failedId}`, headers: auth });
+  const failed = await app.inject({ method: "GET", url: `/runs/${failedId}` });
   assert.equal(failed.statusCode, 200);
   assert.deepEqual(JSON.parse(failed.payload), { run: { id: failedId, status: "failed", verdict: "incomplete" }, judgments: null });
 
@@ -300,7 +289,6 @@ try {
   assert.ok(address !== null && typeof address === "object");
   const connection = once(app.server, "connection");
   const aborted = request({ host: "127.0.0.1", port: address.port, method: "POST", path: "/runs" });
-  aborted.setHeader("authorization", auth.authorization);
   aborted.setHeader("content-type", "application/json");
   aborted.on("error", () => {});
   aborted.end(JSON.stringify(body));
@@ -314,7 +302,7 @@ try {
   await state.settled.promise;
   await tick();
   state.insertGate = Promise.resolve();
-  const after = await app.inject({ method: "POST", url: "/runs", headers: auth, payload: body });
+  const after = await app.inject({ method: "POST", url: "/runs", payload: body });
   assert.equal(after.statusCode, 202);
 
   await app.close();

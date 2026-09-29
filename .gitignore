@@ -3,3 +3,4 @@ dist/
 runs/
 .DS_Store
 .env
+.env.backup
